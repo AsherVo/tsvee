@@ -126,6 +126,46 @@ final class MoveTests: XCTestCase {
     }
 }
 
+final class ColumnTypeTests: XCTestCase {
+
+    func testColumnTypeRoundTrip() {
+        var format = TSSFormat()
+        format.columnTypes[2] = .integer
+        format.columnTypes[4] = .text
+        let out = format.serialize()
+        XCTAssertTrue(out.contains("coltype\t2\tinteger"))
+        XCTAssertTrue(out.contains("coltype\t4\ttext"))
+
+        let parsed = TSSFormat.parse(out)
+        XCTAssertEqual(parsed.columnTypes[2], .integer)
+        XCTAssertEqual(parsed.columnTypes[4], .text)
+        XCTAssertNil(parsed.columnTypes[0])
+    }
+
+    func testRawIsNeverPersisted() {
+        var format = TSSFormat()
+        format.columnTypes[1] = .raw
+        XCTAssertFalse(format.serialize().contains("coltype"))
+        let parsed = TSSFormat.parse("coltype\t1\traw\n")
+        XCTAssertTrue(parsed.columnTypes.isEmpty)
+    }
+}
+
+final class CrossFileLookupTests: XCTestCase {
+
+    func testFirstRowWithID() {
+        let model = SpreadsheetModel()
+        model.load(tsv: "ID\tName\n# Header\t\nslime_red\tRed\nslime_blue\tBlue\nslime_red\tAgain")
+        XCTAssertEqual(model.firstRow(withID: "slime_red"), 2)
+        XCTAssertEqual(model.firstRow(withID: "slime_blue"), 3)
+        XCTAssertNil(model.firstRow(withID: "missing"))
+        // The field-name row never matches, even for the literal "ID".
+        XCTAssertNil(model.firstRow(withID: "ID"))
+        // Header rows can be found (useful for section navigation).
+        XCTAssertEqual(model.firstRow(withID: "# Header"), 1)
+    }
+}
+
 final class TSSFreezeTests: XCTestCase {
 
     func testFreezeDefaultsOnAndOnlyDeviationsPersist() {

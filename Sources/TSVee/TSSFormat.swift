@@ -15,10 +15,19 @@ import Foundation
 ///
 /// TODO(tss): cell styles (font/color/alignment), merged headers, calculated
 /// columns. Add new record types here; unknown records are preserved verbatim.
+/// Per-column data type. `raw` is the default and is never persisted.
+enum ColumnType: String {
+    case raw
+    case integer
+    case float
+    case text
+}
+
 struct TSSFormat {
 
     var columnWidths: [Int: CGFloat] = [:]
     var rowHeights: [Int: CGFloat] = [:]
+    var columnTypes: [Int: ColumnType] = [:]
 
     /// Frozen panes. Both default to true; only deviations are persisted.
     var freezeFieldRow = true
@@ -28,8 +37,8 @@ struct TSSFormat {
     private var unknownRecords: [String] = []
 
     var hasCustomFormatting: Bool {
-        !columnWidths.isEmpty || !rowHeights.isEmpty || !unknownRecords.isEmpty
-            || !freezeFieldRow || !freezeIDColumn
+        !columnWidths.isEmpty || !rowHeights.isEmpty || !columnTypes.isEmpty
+            || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
 
     // MARK: - Sidecar location
@@ -62,6 +71,10 @@ struct TSSFormat {
                 if let index = Int(fields[1]), let height = Double(fields[2]), height > 0 {
                     format.rowHeights[index] = CGFloat(height)
                 }
+            case "coltype" where fields.count >= 3:
+                if let index = Int(fields[1]), let type = ColumnType(rawValue: fields[2]), type != .raw {
+                    format.columnTypes[index] = type
+                }
             case "freeze" where fields.count >= 3:
                 switch fields[1] {
                 case "fieldrow": format.freezeFieldRow = fields[2] != "0"
@@ -84,6 +97,9 @@ struct TSSFormat {
         }
         for (index, height) in rowHeights.sorted(by: { $0.key < $1.key }) {
             lines.append("rowheight\t\(index)\t\(Int(height.rounded()))")
+        }
+        for (index, type) in columnTypes.sorted(by: { $0.key < $1.key }) where type != .raw {
+            lines.append("coltype\t\(index)\t\(type.rawValue)")
         }
         if !freezeFieldRow { lines.append("freeze\tfieldrow\t0") }
         if !freezeIDColumn { lines.append("freeze\tidcol\t0") }

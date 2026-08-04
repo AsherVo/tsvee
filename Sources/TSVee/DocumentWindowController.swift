@@ -73,6 +73,14 @@ final class DocumentWindowController: NSWindowController {
         wireUp(document: document)
         window.makeFirstResponder(spreadsheetView)
 
+        // Debug/automation hook: `-TSVeeDebugDirty 1` marks the document
+        // edited after launch so the dirty indicator can be screenshot-tested.
+        if UserDefaults.standard.bool(forKey: "TSVeeDebugDirty") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak document] in
+                document?.updateChangeCount(.changeDone)
+            }
+        }
+
         // Debug/automation hook: `-TSVeeDebugScroll 400,300` scrolls the grid
         // after launch so scrolled rendering can be screenshot-tested.
         if let spec = UserDefaults.standard.string(forKey: "TSVeeDebugScroll") {
@@ -110,6 +118,13 @@ final class DocumentWindowController: NSWindowController {
         // The document was read before this controller existed, so push the
         // initial state through by hand.
         refreshFormulaBar()
+    }
+
+    /// Brings this sheet forward and selects the given row (cross-file ID
+    /// navigation lands here).
+    func reveal(row: Int) {
+        window?.makeKeyAndOrderFront(nil)
+        spreadsheetView.selectRowAndReveal(row)
     }
 
     private func refreshFormulaBar() {

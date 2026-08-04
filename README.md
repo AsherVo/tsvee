@@ -61,6 +61,28 @@ bundle` app carries).
   menu). The ID column can't be deleted or displaced.
 - Full undo/redo.
 
+## Column data types
+
+Right-click a column (header or any cell) → **Column Data Type**:
+
+- **Raw** (default) — plain left-aligned strings, exactly as on disk.
+- **Integer** / **Float** — right-aligned; values that don't parse are shown
+  in red so bad data is obvious at a glance. Nothing is ever rewritten.
+- **Text** — word-wrapped display with spell-checking while editing; rows
+  grow automatically to fit the tallest text cell.
+
+Types are per-column formatting, stored in the `.tss` sidecar, and they
+follow their column when you drag-reorder. Header (`#`) rows and the
+field-name row ignore column types. **Auto-Size Column** in the same menu
+fits the width to the longest cell (field name included).
+
+## Cross-file ID navigation
+
+The same ID often lives in several files (stats in one, dialogue in
+another). Right-click a row — its header or any cell — and **Go to "id" In**
+lists every other open sheet containing that ID, with its row number.
+Choosing one brings that sheet's window/tab forward and selects the row.
+
 ## Saving & tabs (Sublime-style)
 
 Traditional save paradigm — no autosave-in-place, no Duplicate/Rename

@@ -69,6 +69,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var yOffsets: [CGFloat] = [Metrics.colHeaderHeight]
     private var cachedWidths: [Int: CGFloat] = [:]
     private var cachedHeights: [Int: CGFloat] = [:]
+    private var cachedTypes: [Int: ColumnType] = [:]
+    private var textColumnIndices: [Int] = []
+    /// Wrapped-text height memo, keyed by "width|text" (value-based, so it
+    /// survives model changes).
+    private var wrapHeightCache: [String: CGFloat] = [:]
 
     /// 1 when the field-name row / ID column is frozen, else 0.
     private var frozenRowCount = 0
@@ -148,8 +153,33 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if let model, r < model.rowCount {
             let level = model.headerLevel(ofRow: r)
             if level > 0 { return Metrics.headerRowHeights[level - 1] }
+            // Text columns wrap, so rows grow to fit their tallest text cell.
+            if !textColumnIndices.isEmpty {
+                var h = Metrics.defaultRowHeight
+                for c in textColumnIndices where c < model.columnCount {
+                    let text = model.value(row: r, column: c)
+                    guard !text.isEmpty else { continue }
+                    h = max(h, wrappedHeight(text: text, width: width(ofColumn: c)))
+                }
+                return h
+            }
         }
         return Metrics.defaultRowHeight
+    }
+
+    private func wrappedHeight(text: String, width: CGFloat) -> CGFloat {
+        let key = "\(Int(width))|\(text)"
+        if let cached = wrapHeightCache[key] { return cached }
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byWordWrapping
+        let bounds = (text as NSString).boundingRect(
+            with: NSSize(width: max(width - 12, 20), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin],
+            attributes: [.font: NSFont.systemFont(ofSize: 12), .paragraphStyle: style])
+        let height = max(ceil(bounds.height) + 8, Metrics.defaultRowHeight)
+        if wrapHeightCache.count > 50_000 { wrapHeightCache.removeAll() }
+        wrapHeightCache[key] = height
+        return height
     }
 
     /// Total height of the sticky top chrome: letter band + frozen row.
@@ -162,6 +192,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let format = formatProvider?() ?? TSSFormat()
         cachedWidths = format.columnWidths
         cachedHeights = format.rowHeights
+        cachedTypes = format.columnTypes
+        textColumnIndices = format.columnTypes.filter { $0.value == .text }.keys.sorted()
         frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
         frozenColCount = format.freezeIDColumn ? 1 : 0
         gridRows = model.rowCount + Metrics.phantomRows
@@ -340,22 +372,50 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // Text.
         for r in rows {
             guard r < model.rowCount else { break }
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: cellFont(forRow: r),
-                .foregroundColor: NSColor.labelColor,
-            ]
+            let font = cellFont(forRow: r)
+            // Header and field-name rows ignore column types entirely.
+            let plainRow = model.headerLevel(ofRow: r) == 0 && !model.isFieldNameRow(r)
             for c in cols {
                 guard c < model.columnCount else { break }
                 let text = model.value(row: r, column: c)
                 guard !text.isEmpty else { continue }
                 if editingCell == GridPos(row: r, col: c) { continue }
                 let rect = cellRect(r, c)
-                let size = text.size(withAttributes: attrs)
-                cg.saveGState()
-                rect.insetBy(dx: 1, dy: 1).clip()
-                text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
-                          withAttributes: attrs)
-                cg.restoreGState()
+                let type = plainRow ? (cachedTypes[c] ?? .raw) : .raw
+
+                switch type {
+                case .text:
+                    let style = NSMutableParagraphStyle()
+                    style.lineBreakMode = .byWordWrapping
+                    text.draw(in: rect.insetBy(dx: 6, dy: 4), withAttributes: [
+                        .font: font,
+                        .foregroundColor: NSColor.labelColor,
+                        .paragraphStyle: style,
+                    ])
+                case .integer, .float:
+                    let valid = type == .integer ? Int(text) != nil : Double(text) != nil
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: font,
+                        .foregroundColor: valid ? NSColor.labelColor : NSColor.systemRed,
+                    ]
+                    let size = text.size(withAttributes: attrs)
+                    cg.saveGState()
+                    rect.insetBy(dx: 1, dy: 1).clip()
+                    text.draw(at: NSPoint(x: rect.maxX - size.width - 6, y: rect.midY - size.height / 2),
+                              withAttributes: attrs)
+                    cg.restoreGState()
+                case .raw:
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: font,
+                        .foregroundColor: NSColor.labelColor,
+                    ]
+                    let size = text.size(withAttributes: attrs)
+                    cg.saveGState()
+                    rect.insetBy(dx: 1, dy: 1).clip()
+                    text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
+                              withAttributes: attrs)
+                    cg.restoreGState()
+                }
             }
         }
 
@@ -733,7 +793,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 break
             }
             if let model, let drop = moveDropIndex, range.upperBound < model.columnCount {
-                remapColumnWidths(SpreadsheetModel.moveMapping(range: range, to: drop))
+                remapColumnFormatting(SpreadsheetModel.moveMapping(range: range, to: drop))
                 model.moveColumns(range, to: drop)
                 let newStart = drop > range.upperBound ? drop - range.count : drop
                 anchor = GridPos(row: 0, col: newStart)
@@ -860,16 +920,20 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Formatting remaps (keep .tss widths/heights on moved rows/cols)
 
-    private func remapColumnWidths(_ mapping: [Int: Int]) {
-        guard !mapping.isEmpty, !(formatProvider?().columnWidths.isEmpty ?? true) else { return }
+    private func remapColumnFormatting(_ mapping: [Int: Int]) {
+        guard !mapping.isEmpty, let format = formatProvider?(),
+              !(format.columnWidths.isEmpty && format.columnTypes.isEmpty) else { return }
         onFormatChange? { format in
-            var updated: [Int: CGFloat] = [:]
-            for (k, v) in format.columnWidths { updated[mapping[k] ?? k] = v }
-            format.columnWidths = updated
+            var widths: [Int: CGFloat] = [:]
+            for (k, v) in format.columnWidths { widths[mapping[k] ?? k] = v }
+            format.columnWidths = widths
+            var types: [Int: ColumnType] = [:]
+            for (k, v) in format.columnTypes { types[mapping[k] ?? k] = v }
+            format.columnTypes = types
         }
         let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
         undoManager?.registerUndo(withTarget: self) { view in
-            view.remapColumnWidths(inverse)
+            view.remapColumnFormatting(inverse)
         }
         modelDidChange()
     }
@@ -983,6 +1047,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if pos.col < frozenColCount { frame.origin.x += vis.minX }
         if pos.row < frozenRowCount { frame.origin.y += vis.minY }
 
+        let isTextColumn = cachedTypes[pos.col] == .text
+            && model.headerLevel(ofRow: pos.row) == 0 && !model.isFieldNameRow(pos.row)
+
         let field = NSTextField(frame: frame)
         field.font = cellFont(forRow: pos.row)
         field.isBordered = false
@@ -991,8 +1058,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         field.backgroundColor = .textBackgroundColor
         field.textColor = .labelColor
         field.delegate = self
-        field.cell?.usesSingleLineMode = true
-        field.cell?.isScrollable = true
+        if isTextColumn {
+            field.cell?.usesSingleLineMode = false
+            field.cell?.wraps = true
+            field.cell?.isScrollable = false
+            field.lineBreakMode = .byWordWrapping
+        } else {
+            field.cell?.usesSingleLineMode = true
+            field.cell?.isScrollable = true
+        }
         field.stringValue = initialText ?? model.value(row: pos.row, column: pos.col)
         addSubview(field)
 
@@ -1002,6 +1076,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         window?.makeFirstResponder(field)
         if let fieldEditor = field.currentEditor() {
             fieldEditor.selectedRange = NSRange(location: field.stringValue.count, length: 0)
+            if isTextColumn, let textView = fieldEditor as? NSTextView {
+                textView.isContinuousSpellCheckingEnabled = true
+            }
         }
         needsDisplay = true
     }
@@ -1202,16 +1279,122 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         selectionDidChange()
     }
 
+    // MARK: - Column type & sizing
+
+    @objc private func setColumnType(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let type = ColumnType(rawValue: raw), let model else { return }
+        onFormatChange? { format in
+            for c in selectedCols where c < model.columnCount {
+                if type == .raw {
+                    format.columnTypes.removeValue(forKey: c)
+                } else {
+                    format.columnTypes[c] = type
+                }
+            }
+        }
+        modelDidChange()
+    }
+
+    @objc private func autoSizeColumns(_ sender: Any?) {
+        guard let model else { return }
+        let cols = selectedCols.filter { $0 < model.columnCount }
+        guard !cols.isEmpty else { return }
+        onFormatChange? { format in
+            for c in cols {
+                // Pre-filter by character count so huge sheets only measure a
+                // handful of candidate strings.
+                var candidates: [(row: Int, count: Int)] = []
+                for r in 0..<model.rowCount {
+                    let n = model.value(row: r, column: c).count
+                    if n > 0 { candidates.append((r, n)) }
+                }
+                candidates.sort { $0.count > $1.count }
+                var maxWidth = Metrics.minColWidth
+                for (r, _) in candidates.prefix(24) {
+                    let text = model.value(row: r, column: c)
+                    let w = (text as NSString).size(withAttributes: [.font: cellFont(forRow: r)]).width
+                    maxWidth = max(maxWidth, w + 14)
+                }
+                format.columnWidths[c] = min(maxWidth.rounded(.up), 800)
+            }
+        }
+        modelDidChange()
+    }
+
+    // MARK: - Cross-file ID navigation
+
+    @objc private func jumpToDocument(_ sender: NSMenuItem) {
+        guard let target = sender.representedObject as? CrossFileTarget,
+              let document = target.document else { return }
+        document.showWindows()
+        (document.windowControllers.first as? DocumentWindowController)?.reveal(row: target.row)
+    }
+
+    /// Selects a row (full width), scrolls it into view. Used when arriving
+    /// from another sheet.
+    func selectRowAndReveal(_ row: Int) {
+        guard row < gridRows else { return }
+        anchor = GridPos(row: row, col: 0)
+        focus = GridPos(row: row, col: gridCols - 1)
+        scrollCellToVisible(GridPos(row: row, col: 0))
+        selectionDidChange()
+    }
+
     // MARK: - Context menu & validation
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
-        if case .cell(let pos) = hitArea(at: p), !(selectedRows.contains(pos.row) && selectedCols.contains(pos.col)) {
-            anchor = pos
-            focus = pos
-            selectionDidChange()
+        var contextRow: Int?
+        switch hitArea(at: p) {
+        case .cell(let pos):
+            if !(selectedRows.contains(pos.row) && selectedCols.contains(pos.col)) {
+                anchor = pos
+                focus = pos
+                selectionDidChange()
+            }
+            contextRow = pos.row
+        case .rowHeader(let r):
+            if !(isFullRowSelection && selectedRows.contains(r)) {
+                selectRow(r, extend: false)
+            }
+            contextRow = r
+        case .columnHeader(let c, _):
+            if !(isFullColumnSelection && selectedCols.contains(c)) {
+                selectColumn(c, extend: false)
+            }
+        case .corner:
+            return nil
         }
+
         let menu = NSMenu()
+
+        // "Go to <ID> in <other sheet>" — same ID in other open files.
+        if let model, let row = contextRow, row < model.rowCount {
+            let id = model.value(row: row, column: 0)
+            if !id.isEmpty, !id.hasPrefix("#"), !model.isFieldNameRow(row) {
+                let submenu = NSMenu()
+                for case let document as TSVDocument in NSDocumentController.shared.documents
+                where document.model !== model {
+                    guard let targetRow = document.model.firstRow(withID: id) else { continue }
+                    let item = NSMenuItem(
+                        title: "\(document.displayName ?? "Untitled") — row \(targetRow + 1)",
+                        action: #selector(jumpToDocument(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = CrossFileTarget(document: document, row: targetRow)
+                    submenu.addItem(item)
+                }
+                if submenu.items.isEmpty {
+                    submenu.addItem(withTitle: "No Other Open Sheet Has This ID", action: nil, keyEquivalent: "")
+                }
+                let shownID = id.count > 30 ? id.prefix(30) + "…" : id
+                let goTo = NSMenuItem(title: "Go to “\(shownID)” In", action: nil, keyEquivalent: "")
+                goTo.submenu = submenu
+                menu.addItem(goTo)
+                menu.addItem(.separator())
+            }
+        }
+
         menu.addItem(withTitle: "Cut", action: #selector(cut(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
@@ -1223,7 +1406,40 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         menu.addItem(withTitle: "Insert Column Left", action: #selector(insertColumnLeft(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Insert Column Right", action: #selector(insertColumnRight(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Delete Columns", action: #selector(deleteSelectedColumns(_:)), keyEquivalent: "")
-        for item in menu.items { item.target = self }
+
+        // Column formatting — hidden for whole-row selections, where "the
+        // selected columns" would mean every column in the sheet.
+        if !isFullRowSelection, let model {
+            menu.addItem(.separator())
+
+            let typeMenu = NSMenu()
+            let selectedTypes = Set(selectedCols
+                .filter { $0 < model.columnCount }
+                .map { cachedTypes[$0] ?? .raw })
+            for (title, type) in [("Raw", ColumnType.raw), ("Integer", .integer),
+                                  ("Float", .float), ("Text", .text)] {
+                let item = NSMenuItem(title: title, action: #selector(setColumnType(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = type.rawValue
+                if selectedTypes == [type] { item.state = .on }
+                else if selectedTypes.contains(type) { item.state = .mixed }
+                typeMenu.addItem(item)
+            }
+            let plural = selectedCols.count > 1
+            let typeItem = NSMenuItem(title: plural ? "Column Data Types" : "Column Data Type",
+                                      action: nil, keyEquivalent: "")
+            typeItem.submenu = typeMenu
+            menu.addItem(typeItem)
+
+            let autoSize = NSMenuItem(title: plural ? "Auto-Size Columns" : "Auto-Size Column",
+                                      action: #selector(autoSizeColumns(_:)), keyEquivalent: "")
+            autoSize.target = self
+            menu.addItem(autoSize)
+        }
+
+        for item in menu.items where item.target == nil && item.action != nil {
+            item.target = self
+        }
         return menu
     }
 
@@ -1254,5 +1470,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         default:
             return true
         }
+    }
+}
+
+/// Payload for the "Go to <ID> in <sheet>" context-menu items.
+private final class CrossFileTarget: NSObject {
+    weak var document: TSVDocument?
+    let row: Int
+
+    init(document: TSVDocument, row: Int) {
+        self.document = document
+        self.row = row
     }
 }

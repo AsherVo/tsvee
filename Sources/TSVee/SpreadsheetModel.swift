@@ -85,6 +85,16 @@ final class SpreadsheetModel {
 
     func isFieldNameRow(_ row: Int) -> Bool { row == 0 && hasFieldNameRow }
 
+    /// First row whose ID matches exactly (used for cross-file navigation).
+    /// The field-name row doesn't count.
+    func firstRow(withID id: String) -> Int? {
+        for (index, row) in rows.enumerated() where row[0] == id {
+            if isFieldNameRow(index) { continue }
+            return index
+        }
+        return nil
+    }
+
     // MARK: - Mutations (all undoable)
 
     func setValue(_ newValue: String, row: Int, column: Int) {
