@@ -33,6 +33,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         static let phantomCols = 26
         static let resizeGrabMargin: CGFloat = 4
         static let fillHandleGrabMargin: CGFloat = 6
+        /// Disclosure triangle for section headers, in the row-number strip.
+        static let toggleSize: CGFloat = 9
+        static let toggleHitWidth: CGFloat = 17
+        static let frozenEdgeThickness: CGFloat = 3
     }
 
     private enum Palette {
@@ -54,6 +58,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             default: return NSColor.systemGray.withAlphaComponent(0.08)   // ### = comment
             }
         }
+
+        static var frozenEdge: NSColor { NSColor.separatorColor.withAlphaComponent(1.0) }
     }
 
     // MARK: - Wiring
@@ -83,6 +89,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// 1 when the field-name row / ID column is frozen, else 0.
     private var frozenRowCount = 0
     private var frozenColCount = 0
+
+    /// Header rows whose sections are collapsed (mirrors the `.tss` set).
+    private var collapsedRows: Set<Int> = []
+    /// Rows currently folded out of sight — the union of every collapsed
+    /// section's body. Derived; hidden rows have height 0, which is what makes
+    /// the rest of the view's geometry, drawing, and hit testing come along for
+    /// free.
+    private var hiddenRows: Set<Int> = []
 
     private var anchor = GridPos(row: 0, col: 0)
     private var focus = GridPos(row: 0, col: 0)
@@ -154,6 +168,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     private func height(ofRow r: Int) -> CGFloat {
+        if hiddenRows.contains(r) { return 0 }
         if let custom = cachedHeights[r] { return custom }
         if let model, r < model.rowCount {
             let level = model.headerLevel(ofRow: r)
@@ -203,9 +218,23 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         frozenColCount = format.freezeIDColumn ? 1 : 0
         gridRows = model.rowCount + Metrics.phantomRows
         gridCols = model.columnCount + Metrics.phantomCols
+        collapsedRows = format.collapsedSections
+        recomputeHiddenRows(model: model)
         clampSelection()
         rebuildOffsets()
         needsDisplay = true
+    }
+
+    /// Folds every collapsed header's section body out of sight. Entries that
+    /// no longer name a header with a body simply contribute nothing, so
+    /// editing the "#" off a header always brings its rows back.
+    private func recomputeHiddenRows(model: SpreadsheetModel) {
+        var hidden: Set<Int> = []
+        for row in collapsedRows {
+            guard let body = model.sectionBody(ofRow: row) else { continue }
+            hidden.formUnion(body)
+        }
+        hiddenRows = hidden
     }
 
     private func rebuildOffsets() {
@@ -253,6 +282,30 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         anchor.col = min(max(anchor.col, 0), gridCols - 1)
         focus.row = min(max(focus.row, 0), gridRows - 1)
         focus.col = min(max(focus.col, 0), gridCols - 1)
+        // A selection endpoint inside a freshly collapsed section would be a
+        // zero-height sliver you could still type into; pull it up to the
+        // header that swallowed it.
+        anchor.row = visibleRow(from: anchor.row, searching: -1)
+        focus.row = visibleRow(from: focus.row, searching: -1)
+    }
+
+    /// Nearest unfolded row starting at `row` and walking by `step`, falling
+    /// back to the other direction at the grid's edge. Row 0 and the phantom
+    /// rows past the data are never hidden, so this always lands somewhere.
+    private func visibleRow(from row: Int, searching step: Int) -> Int {
+        var r = min(max(row, 0), gridRows - 1)
+        while hiddenRows.contains(r), r + step >= 0, r + step < gridRows { r += step }
+        while hiddenRows.contains(r), r - step >= 0, r - step < gridRows { r -= step }
+        return r
+    }
+
+    /// Nudges a row insertion boundary past any folded section it falls inside,
+    /// so rows dropped or inserted just under a collapsed header land after the
+    /// whole section instead of materializing already hidden.
+    private func insertionBoundary(_ index: Int, rowCount: Int) -> Int {
+        var at = index
+        while at < rowCount, hiddenRows.contains(at) { at += 1 }
+        return at
     }
 
     private var selectedRows: ClosedRange<Int> { min(anchor.row, focus.row)...max(anchor.row, focus.row) }
@@ -342,7 +395,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
         // Row backgrounds (header tints span the full row).
         let fullWidth = xOffsets[gridCols] - xOffsets[0]
-        for r in rows {
+        for r in rows where !hiddenRows.contains(r) {
             var fill: NSColor?
             if r < model.rowCount {
                 let level = model.headerLevel(ofRow: r)
@@ -374,8 +427,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             NSRect(x: left, y: yOffsets[r] - 0.5, width: right - left, height: 1).fill()
         }
 
+        // Collapsed headers get a firm bottom edge — the seam where the folded
+        // rows went (the skipped row numbers are the other half of the cue).
+        Palette.paneEdge.setFill()
+        for r in rows where collapsedRows.contains(r) && !hiddenRows.contains(r) {
+            guard model.sectionBody(ofRow: r) != nil else { continue }
+            NSRect(x: xOffsets[0], y: yOffsets[r + 1] - 2, width: fullWidth, height: 2).fill()
+        }
+
         // Text.
-        for r in rows {
+        for r in rows where !hiddenRows.contains(r) {
             guard r < model.rowCount else { break }
             // Header and field-name rows ignore column types entirely.
             let plainRow = model.headerLevel(ofRow: r) == 0 && !model.isFieldNameRow(r)
@@ -463,7 +524,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         default:
             return model.isFieldNameRow(row)
                 ? .systemFont(ofSize: 12, weight: .semibold)
-                : .systemFont(ofSize: 12)
+                : .systemFont(ofSize: 12, weight: .medium)
         }
     }
 
@@ -471,13 +532,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // IDs are identifiers — monospace in plain data rows.
         if column == 0, let model, row < model.rowCount,
            model.headerLevel(ofRow: row) == 0, !model.isFieldNameRow(row) {
-            return .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+            return .monospacedSystemFont(ofSize: 11.5, weight: .medium)
         }
         return cellFont(forRow: row)
     }
 
     private func textColor(forRow row: Int) -> NSColor {
-        guard let model, row < model.rowCount else { return .labelColor }
+        guard let model, row < model.rowCount else { return .textColor }
         return model.headerLevel(ofRow: row) == 3 ? .secondaryLabelColor : .labelColor
     }
 
@@ -507,6 +568,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         func drawNumber(_ r: Int, translateY: CGFloat) {
+            guard !hiddenRows.contains(r) else { return }
             let rect = NSRect(x: vis.minX, y: yOffsets[r] + translateY,
                               width: headerW, height: height(ofRow: r))
             if selectedRows.contains(r) {
@@ -522,6 +584,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let size = title.size(withAttributes: attrs)
             title.draw(at: NSPoint(x: rect.maxX - size.width - 7, y: rect.midY - size.height / 2),
                        withAttributes: attrs)
+            if model.sectionBody(ofRow: r) != nil {
+                drawSectionToggle(in: rect, collapsed: collapsedRows.contains(r))
+            }
             Palette.gridLine.setFill()
             NSRect(x: vis.minX, y: rect.maxY - 0.5, width: headerW, height: 1).fill()
         }
@@ -558,13 +623,46 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         Palette.gridLine.setFill()
         NSRect(x: vis.minX, y: vis.minY + headerH - 0.5, width: vis.width, height: 1).fill()
         NSRect(x: vis.minX + headerW - 0.5, y: vis.minY, width: 1, height: vis.height).fill()
-        Palette.paneEdge.setFill()
+        Palette.gridLine.setFill()
         if frozenRowCount > 0 {
-            NSRect(x: vis.minX, y: vis.minY + chromeTop - 2, width: vis.width, height: 3).fill()
+            NSRect(x: vis.minX, y: vis.minY + chromeTop - Metrics.frozenEdgeThickness * 2/3, width: vis.width, height: Metrics.frozenEdgeThickness).fill()
         }
         if frozenColCount > 0 {
-            NSRect(x: vis.minX + chromeLeft - 2, y: vis.minY, width: 3, height: vis.height).fill()
+            NSRect(x: vis.minX + chromeLeft - Metrics.frozenEdgeThickness * 2/3, y: vis.minY, width: Metrics.frozenEdgeThickness, height: vis.height).fill()
         }
+    }
+
+    /// Disclosure triangle for a section header, drawn at the left of its
+    /// row-number cell: pointing down when open, accent-tinted and pointing
+    /// right when the section is folded.
+    private func drawSectionToggle(in rowRect: NSRect, collapsed: Bool) {
+        let s = Metrics.toggleSize
+        let x = rowRect.minX + 6
+        let y = rowRect.midY - s / 2
+        let path = NSBezierPath()
+        if collapsed {
+            path.move(to: NSPoint(x: x + 1, y: y))
+            path.line(to: NSPoint(x: x + 1, y: y + s))
+            path.line(to: NSPoint(x: x + s - 1, y: y + s / 2))
+        } else {
+            path.move(to: NSPoint(x: x, y: y + 1))
+            path.line(to: NSPoint(x: x + s, y: y + 1))
+            path.line(to: NSPoint(x: x + s / 2, y: y + s - 1))
+        }
+        path.close()
+        (collapsed ? NSColor.controlAccentColor : Palette.chromeText).setFill()
+        path.fill()
+    }
+
+    /// On-screen hit box for a header row's triangle — the left edge of the
+    /// row-number strip, leaving the (right-aligned) number itself clickable
+    /// for row selection. nil when the row folds nothing.
+    private func sectionToggleScreenRect(row: Int, vis: NSRect) -> NSRect? {
+        guard let model, row < model.rowCount, !hiddenRows.contains(row),
+              model.sectionBody(ofRow: row) != nil else { return nil }
+        let sticky = row < frozenRowCount ? vis.minY : 0
+        return NSRect(x: vis.minX, y: yOffsets[row] + sticky,
+                      width: Metrics.toggleHitWidth, height: height(ofRow: row))
     }
 
     private func drawMoveIndicator(vis: NSRect) {
@@ -588,6 +686,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case corner
         case columnHeader(col: Int, resizeEdgeOf: Int?)
         case rowHeader(row: Int)
+        case sectionToggle(row: Int)
         case cell(GridPos)
     }
 
@@ -604,7 +703,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if frozenRowCount > 0, y < vis.minY + chromeTop {
             return rowAt(min(max(y - vis.minY, yOffsets[0]), chromeTop - 0.5))
         }
-        return rowAt(y)
+        // Folded rows share their successor's offset, so the search already
+        // lands on a visible row everywhere but the clamped past-the-end case.
+        return visibleRow(from: rowAt(y), searching: -1)
     }
 
     private func hitArea(at p: NSPoint) -> HitArea {
@@ -629,7 +730,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             return .columnHeader(col: c, resizeEdgeOf: nil)
         }
         if p.x < vis.minX + Metrics.rowHeaderWidth {
-            return .rowHeader(row: rowAtScreenY(p.y, vis: vis))
+            let r = rowAtScreenY(p.y, vis: vis)
+            if let toggle = sectionToggleScreenRect(row: r, vis: vis), toggle.contains(p) {
+                return .sectionToggle(row: r)
+            }
+            return .rowHeader(row: r)
         }
         return .cell(GridPos(row: rowAtScreenY(p.y, vis: vis), col: columnAtScreenX(p.x, vis: vis)))
     }
@@ -678,6 +783,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 selectColumn(c, extend: shift)
                 dragMode = .selectColumns
             }
+
+        case .sectionToggle(let r):
+            // ⌥-click folds/unfolds the subsections along with the section.
+            setSection(headerRow: r,
+                       collapsed: !collapsedRows.contains(r),
+                       includingSubsections: event.modifierFlags.contains(.option))
 
         case .rowHeader(let r):
             if !shift, isFullRowSelection, selectedRows.contains(r) {
@@ -761,6 +872,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let mid = (yOffsets[r] + yOffsets[r + 1]) / 2
             var idx = p.y > mid ? r + 1 : r
             idx = min(max(idx, frozenRowCount), model.rowCount)
+            idx = insertionBoundary(idx, rowCount: model.rowCount)
             moveDropIndex = (idx < range.lowerBound || idx > range.upperBound + 1) ? idx : nil
             NSCursor.closedHand.set()
             needsDisplay = true
@@ -800,7 +912,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 break
             }
             if let model, let drop = moveDropIndex, range.upperBound < model.rowCount {
-                remapRowHeights(SpreadsheetModel.moveMapping(range: range, to: drop))
+                remapRowFormatting(SpreadsheetModel.moveMapping(range: range, to: drop))
                 model.moveRows(range, to: drop)
                 let newStart = drop > range.upperBound ? drop - range.count : drop
                 anchor = GridPos(row: newStart, col: 0)
@@ -846,6 +958,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             } else {
                 NSCursor.arrow.set()
             }
+        case .sectionToggle:
+            NSCursor.pointingHand.set()
         case .rowHeader(let r):
             if isFullRowSelection, selectedRows.contains(r) {
                 NSCursor.openHand.set()
@@ -859,6 +973,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Autofill (fill handle)
 
+    /// How far an unbroken run of unfolded rows reaches from `start` toward
+    /// `limit`, or nil when `start` is itself folded. Autofill drags stop at
+    /// the fold rather than writing into cells the user can't see.
+    private func visibleRun(from start: Int, through limit: Int, step: Int) -> Int? {
+        guard !hiddenRows.contains(start) else { return nil }
+        var last = start
+        while last != limit, !hiddenRows.contains(last + step) { last += step }
+        return last
+    }
+
     private func updateFillTarget(pointer p: NSPoint) {
         let rect = rectFor(rows: selectedRows, cols: selectedCols)
         let dx = p.x > rect.maxX ? p.x - rect.maxX : (p.x < rect.minX ? p.x - rect.minX : 0)
@@ -868,13 +992,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if abs(dy) >= abs(dx), dy != 0 {
             if dy > 0 {
                 let end = rowAt(p.y)
-                if end > selectedRows.upperBound {
-                    target = ((selectedRows.upperBound + 1)...end, selectedCols, .down)
+                if end > selectedRows.upperBound,
+                   let stop = visibleRun(from: selectedRows.upperBound + 1, through: end, step: 1) {
+                    target = ((selectedRows.upperBound + 1)...stop, selectedCols, .down)
                 }
             } else {
                 let start = rowAt(p.y)
-                if start < selectedRows.lowerBound {
-                    target = (start...(selectedRows.lowerBound - 1), selectedCols, .up)
+                if start < selectedRows.lowerBound,
+                   let stop = visibleRun(from: selectedRows.lowerBound - 1, through: start, step: -1) {
+                    target = (stop...(selectedRows.lowerBound - 1), selectedCols, .up)
                 }
             }
         } else if dx != 0 {
@@ -960,16 +1086,18 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         modelDidChange()
     }
 
-    private func remapRowHeights(_ mapping: [Int: Int]) {
-        guard !mapping.isEmpty, !(formatProvider?().rowHeights.isEmpty ?? true) else { return }
+    private func remapRowFormatting(_ mapping: [Int: Int]) {
+        guard !mapping.isEmpty, let format = formatProvider?(),
+              !(format.rowHeights.isEmpty && format.collapsedSections.isEmpty) else { return }
         onFormatChange? { format in
             var updated: [Int: CGFloat] = [:]
             for (k, v) in format.rowHeights { updated[mapping[k] ?? k] = v }
             format.rowHeights = updated
+            format.collapsedSections = Set(format.collapsedSections.map { mapping[$0] ?? $0 })
         }
         let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
         undoManager?.registerUndo(withTarget: self) { view in
-            view.remapRowHeights(inverse)
+            view.remapRowFormatting(inverse)
         }
         modelDidChange()
     }
@@ -1011,6 +1139,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func move(dRow: Int, dCol: Int, extend: Bool) {
         var target = focus
         target.row = min(max(target.row + dRow, 0), gridRows - 1)
+        // Arrowing over a collapsed section steps across it in one go.
+        if dRow != 0 {
+            target.row = visibleRow(from: target.row, searching: dRow > 0 ? 1 : -1)
+        }
         target.col = min(max(target.col + dCol, 0), gridCols - 1)
         focus = target
         if !extend { anchor = target }
@@ -1056,7 +1188,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     func beginEditing(at pos: GridPos, initialText: String?) {
-        guard let model else { return }
+        guard let model, !hiddenRows.contains(pos.row) else { return }
         commitEdit(thenMove: nil)
         anchor = pos
         focus = pos
@@ -1229,6 +1361,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard let model else { return }
         anchor = GridPos(row: 0, col: 0)
         focus = GridPos(row: max(model.rowCount - 1, 0), col: max(model.columnCount - 1, 0))
+        // Keeps the cursor off a folded row when the last section is collapsed.
+        clampSelection()
         selectionDidChange()
     }
 
@@ -1259,21 +1393,122 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         modelDidChange()
     }
 
+    // MARK: - Section folding
+
+    /// The section the cursor sits in — the focused row itself when it's a
+    /// header, otherwise the innermost section around it.
+    private var focusedSectionHeader: Int? {
+        guard let model, focus.row < model.rowCount else { return nil }
+        return model.enclosingSectionHeader(ofRow: focus.row)
+    }
+
+    /// Folds/unfolds one header's section, optionally carrying every
+    /// subsection nested inside it along.
+    private func setSection(headerRow: Int, collapsed: Bool, includingSubsections: Bool) {
+        guard let model, let body = model.sectionBody(ofRow: headerRow) else { return }
+        var affected = [headerRow]
+        if includingSubsections {
+            affected += body.filter { model.sectionBody(ofRow: $0) != nil }
+        }
+        applySectionCollapse(rows: affected, collapsed: collapsed)
+    }
+
+    private func applySectionCollapse(rows: [Int], collapsed: Bool) {
+        guard let model, !rows.isEmpty else { return }
+        // Prune entries whose "#" has been edited away since they were written.
+        var updated = collapsedRows.intersection(model.sectionHeaderRows())
+        if collapsed { updated.formUnion(rows) } else { updated.subtract(rows) }
+        guard updated != collapsedRows else { return }
+        onFormatChange? { $0.collapsedSections = updated }
+        modelDidChange()
+        selectionDidChange()
+    }
+
+    /// Unfolds whatever is hiding a row. Cross-file jumps and duplicate-ID
+    /// hops go through here so they never land on an invisible row.
+    private func expandToReveal(row: Int) {
+        guard let model, hiddenRows.contains(row) else { return }
+        let blockers = collapsedRows.filter { model.sectionBody(ofRow: $0)?.contains(row) ?? false }
+        applySectionCollapse(rows: Array(blockers), collapsed: false)
+    }
+
+    @objc func collapseSection(_ sender: Any?) {
+        guard let header = focusedSectionHeader else { return }
+        setSection(headerRow: header, collapsed: true, includingSubsections: false)
+    }
+
+    @objc func expandSection(_ sender: Any?) {
+        guard let header = focusedSectionHeader else { return }
+        setSection(headerRow: header, collapsed: false, includingSubsections: false)
+    }
+
+    @objc func collapseAllSections(_ sender: Any?) {
+        guard let model else { return }
+        applySectionCollapse(rows: model.sectionHeaderRows(), collapsed: true)
+    }
+
+    @objc func expandAllSections(_ sender: Any?) {
+        applySectionCollapse(rows: Array(collapsedRows), collapsed: false)
+    }
+
     // MARK: - Row / column commands (Sheet menu + context menu)
 
     @objc func insertRowAbove(_ sender: Any?) {
-        model?.insertRow(at: selectedRows.lowerBound)
+        guard let model else { return }
+        let at = selectedRows.lowerBound
+        shiftRowFormatting { SpreadsheetModel.shiftedRowIndex($0, afterInsertAt: at) }
+        model.insertRow(at: at)
     }
 
     @objc func insertRowBelow(_ sender: Any?) {
         guard let model else { return }
-        model.insertRow(at: min(selectedRows.upperBound + 1, model.rowCount))
+        let at = insertionBoundary(min(selectedRows.upperBound + 1, model.rowCount),
+                                   rowCount: model.rowCount)
+        shiftRowFormatting { SpreadsheetModel.shiftedRowIndex($0, afterInsertAt: at) }
+        model.insertRow(at: at)
     }
 
     @objc func deleteSelectedRows(_ sender: Any?) {
         guard let model else { return }
         let indexes = IndexSet(selectedRows.filter { $0 < model.rowCount })
+        // Mirror removeRows' own guard so the formatting shift can't run ahead
+        // of a rejected deletion.
+        guard !indexes.isEmpty, indexes.count < model.rowCount else { return }
+        shiftRowFormatting { SpreadsheetModel.shiftedRowIndex($0, afterRemoving: indexes) }
         model.removeRows(indexes)
+    }
+
+    /// Re-keys per-row `.tss` state (heights, collapsed sections) so it stays
+    /// attached to its content when rows are inserted or deleted above it.
+    /// State on a deleted row is dropped — a collapsed header that outlived its
+    /// row would keep its section folded with no triangle to unfold it.
+    private func shiftRowFormatting(_ transform: (Int) -> Int?) {
+        guard let format = formatProvider?(),
+              !format.rowHeights.isEmpty || !format.collapsedSections.isEmpty else { return }
+        var heights: [Int: CGFloat] = [:]
+        for (row, height) in format.rowHeights {
+            if let moved = transform(row) { heights[moved] = height }
+        }
+        setRowFormatting(heights: heights,
+                         collapsed: Set(format.collapsedSections.compactMap(transform)))
+    }
+
+    /// Replaces the per-row `.tss` state wholesale, registering the exact
+    /// inverse so it rides along in the same undo group as the row
+    /// insert/delete that prompted it.
+    private func setRowFormatting(heights: [Int: CGFloat], collapsed: Set<Int>) {
+        guard let format = formatProvider?() else { return }
+        let previousHeights = format.rowHeights
+        let previousCollapsed = format.collapsedSections
+        guard heights != previousHeights || collapsed != previousCollapsed else { return }
+        onFormatChange? {
+            $0.rowHeights = heights
+            $0.collapsedSections = collapsed
+        }
+        undoManager?.registerUndo(withTarget: self) { view in
+            view.setRowFormatting(heights: previousHeights, collapsed: previousCollapsed)
+        }
+        modelDidChange()
     }
 
     @objc func insertColumnLeft(_ sender: Any?) {
@@ -1295,6 +1530,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard let model, !model.duplicateIDRows.isEmpty else { return }
         let sorted = model.duplicateIDRows.sorted()
         let next = sorted.first(where: { $0 > focus.row }) ?? sorted[0]
+        expandToReveal(row: next)
         anchor = GridPos(row: next, col: 0)
         focus = anchor
         scrollCellToVisible(anchor)
@@ -1357,6 +1593,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// from another sheet.
     func selectRowAndReveal(_ row: Int) {
         guard row < gridRows else { return }
+        expandToReveal(row: row)
         anchor = GridPos(row: row, col: 0)
         focus = GridPos(row: row, col: gridCols - 1)
         scrollCellToVisible(GridPos(row: row, col: 0))
@@ -1376,7 +1613,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 selectionDidChange()
             }
             contextRow = pos.row
-        case .rowHeader(let r):
+        case .rowHeader(let r), .sectionToggle(let r):
             if !(isFullRowSelection && selectedRows.contains(r)) {
                 selectRow(r, extend: false)
             }
@@ -1415,6 +1652,23 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 menu.addItem(goTo)
                 menu.addItem(.separator())
             }
+        }
+
+        // Section folding — only where there's a section to fold.
+        if let header = focusedSectionHeader, let model {
+            let name = model.value(row: header, column: 0)
+            let shown = name.count > 30 ? name.prefix(30) + "…" : name
+            let collapsed = collapsedRows.contains(header)
+            let item = NSMenuItem(
+                title: collapsed ? "Expand “\(shown)”" : "Collapse “\(shown)”",
+                action: collapsed ? #selector(expandSection(_:)) : #selector(collapseSection(_:)),
+                keyEquivalent: "")
+            menu.addItem(item)
+            menu.addItem(withTitle: "Collapse All Sections",
+                         action: #selector(collapseAllSections(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Expand All Sections",
+                         action: #selector(expandAllSections(_:)), keyEquivalent: "")
+            menu.addItem(.separator())
         }
 
         menu.addItem(withTitle: "Cut", action: #selector(cut(_:)), keyEquivalent: "")
@@ -1487,6 +1741,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             return selectedRows.lowerBound < model.rowCount && model.rowCount > 1
         case #selector(jumpToNextDuplicateID(_:)):
             return !(model?.duplicateIDRows.isEmpty ?? true)
+        case #selector(collapseSection(_:)):
+            guard let header = focusedSectionHeader else { return false }
+            return !collapsedRows.contains(header)
+        case #selector(expandSection(_:)):
+            guard let header = focusedSectionHeader else { return false }
+            return collapsedRows.contains(header)
+        case #selector(collapseAllSections(_:)):
+            guard let model else { return false }
+            return model.sectionHeaderRows().contains { !collapsedRows.contains($0) }
+        case #selector(expandAllSections(_:)):
+            return !collapsedRows.isEmpty
         case #selector(paste(_:)):
             return NSPasteboard.general.string(forType: .string) != nil
         default:

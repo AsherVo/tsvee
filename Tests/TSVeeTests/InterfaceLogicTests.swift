@@ -166,6 +166,38 @@ final class CrossFileLookupTests: XCTestCase {
     }
 }
 
+final class TSSCollapseTests: XCTestCase {
+
+    func testCollapsedSectionsRoundTrip() {
+        var format = TSSFormat()
+        format.collapsedSections = [7, 2]
+        let out = format.serialize()
+        // Written in row order, so sidecar diffs stay stable.
+        XCTAssertTrue(out.contains("collapsed\t2\t1\ncollapsed\t7\t1"))
+
+        let parsed = TSSFormat.parse(out)
+        XCTAssertEqual(parsed.collapsedSections, [2, 7])
+    }
+
+    func testNoCollapsedSectionsMeansNoRecordsAndNoSidecar() {
+        let format = TSSFormat()
+        XCTAssertTrue(format.collapsedSections.isEmpty)
+        XCTAssertFalse(format.serialize().contains("collapsed"))
+        XCTAssertFalse(format.hasCustomFormatting)
+    }
+
+    func testCollapsedSectionsCountAsFormattingWorthSaving() {
+        var format = TSSFormat()
+        format.collapsedSections = [3]
+        XCTAssertTrue(format.hasCustomFormatting)
+    }
+
+    func testMalformedAndClearedCollapseRecordsAreIgnored() {
+        let format = TSSFormat.parse("collapsed\tnot-a-number\t1\ncollapsed\t4\t0\ncollapsed\t5\n")
+        XCTAssertTrue(format.collapsedSections.isEmpty)
+    }
+}
+
 final class TSSFreezeTests: XCTestCase {
 
     func testFreezeDefaultsOnAndOnlyDeviationsPersist() {

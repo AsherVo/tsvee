@@ -12,6 +12,7 @@ import Foundation
 ///     tss	0
 ///     colwidth	<columnIndex>	<points>
 ///     rowheight	<rowIndex>	<points>
+///     collapsed	<headerRowIndex>	1
 ///
 /// TODO(tss): cell styles (font/color/alignment), merged headers, calculated
 /// columns. Add new record types here; unknown records are preserved verbatim.
@@ -29,6 +30,11 @@ struct TSSFormat {
     var rowHeights: [Int: CGFloat] = [:]
     var columnTypes: [Int: ColumnType] = [:]
 
+    /// Header rows whose sections are collapsed. Entries for rows that are no
+    /// longer headers are inert (and pruned on the next toggle), so an edited-
+    /// away "#" can never strand its rows out of sight.
+    var collapsedSections: Set<Int> = []
+
     /// Frozen panes. Both default to true; only deviations are persisted.
     var freezeFieldRow = true
     var freezeIDColumn = true
@@ -38,6 +44,7 @@ struct TSSFormat {
 
     var hasCustomFormatting: Bool {
         !columnWidths.isEmpty || !rowHeights.isEmpty || !columnTypes.isEmpty
+            || !collapsedSections.isEmpty
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
 
@@ -75,6 +82,10 @@ struct TSSFormat {
                 if let index = Int(fields[1]), let type = ColumnType(rawValue: fields[2]), type != .raw {
                     format.columnTypes[index] = type
                 }
+            case "collapsed" where fields.count >= 3:
+                if let index = Int(fields[1]), index >= 0, fields[2] != "0" {
+                    format.collapsedSections.insert(index)
+                }
             case "freeze" where fields.count >= 3:
                 switch fields[1] {
                 case "fieldrow": format.freezeFieldRow = fields[2] != "0"
@@ -100,6 +111,9 @@ struct TSSFormat {
         }
         for (index, type) in columnTypes.sorted(by: { $0.key < $1.key }) where type != .raw {
             lines.append("coltype\t\(index)\t\(type.rawValue)")
+        }
+        for index in collapsedSections.sorted() {
+            lines.append("collapsed\t\(index)\t1")
         }
         if !freezeFieldRow { lines.append("freeze\tfieldrow\t0") }
         if !freezeIDColumn { lines.append("freeze\tidcol\t0") }

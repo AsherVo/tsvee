@@ -113,6 +113,26 @@ enum MainMenu {
         menu.addItem(withTitle: "Delete Columns",
                      action: NSSelectorFromString("deleteSelectedColumns:"), keyEquivalent: "")
         menu.addItem(.separator())
+        let leftArrow = String(UnicodeScalar(UInt16(NSLeftArrowFunctionKey))!)
+        let rightArrow = String(UnicodeScalar(UInt16(NSRightArrowFunctionKey))!)
+        let collapse = menu.addItem(withTitle: "Collapse Section",
+                                    action: NSSelectorFromString("collapseSection:"),
+                                    keyEquivalent: leftArrow)
+        collapse.keyEquivalentModifierMask = [.command, .option]
+        let expand = menu.addItem(withTitle: "Expand Section",
+                                  action: NSSelectorFromString("expandSection:"),
+                                  keyEquivalent: rightArrow)
+        expand.keyEquivalentModifierMask = [.command, .option]
+        let collapseAll = menu.addItem(withTitle: "Collapse All Sections",
+                                       action: NSSelectorFromString("collapseAllSections:"),
+                                       keyEquivalent: leftArrow)
+        collapseAll.keyEquivalentModifierMask = [.command, .option, .shift]
+        let expandAll = menu.addItem(withTitle: "Expand All Sections",
+                                     action: NSSelectorFromString("expandAllSections:"),
+                                     keyEquivalent: rightArrow)
+        expandAll.keyEquivalentModifierMask = [.command, .option, .shift]
+
+        menu.addItem(.separator())
         let jump = menu.addItem(withTitle: "Jump to Next Duplicate ID",
                                 action: NSSelectorFromString("jumpToNextDuplicateID:"), keyEquivalent: "d")
         jump.keyEquivalentModifierMask = [.command, .shift]

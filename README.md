@@ -25,10 +25,11 @@ bundle` app carries).
    `⚠ N duplicate IDs` badge appears in the formula bar, and clicking it (or
    Sheet → Jump to Next Duplicate ID, ⇧⌘D) cycles through the offenders.
 2. **`#` IDs are section headers.** `#` is a top-level header and `##` a
-   subheader — both get accent-tinted rows with bolder/larger type. `###`
-   (or more) renders as a **greyed-out italic comment row**. All are exempt
-   from the uniqueness rule, so two `## Stats` sections under different
-   headers are fine.
+   subheader — both get accent-tinted rows with bolder/larger type, and both
+   open a **collapsible section**. `###` (or more) renders as a **greyed-out
+   italic comment row**: it's ordinary content, so it neither collapses nor
+   closes the section it sits in. All are exempt from the uniqueness rule, so
+   two `## Stats` sections under different headers are fine.
 3. If row 1's ID cell is literally `ID`, it's treated as the **field-name
    row**: bold on a grey band and exempt from uniqueness. IDs in data rows
    are drawn in monospace.
@@ -61,6 +62,28 @@ bundle` app carries).
 - Right-click for insert/delete row & column operations (also in the Sheet
   menu). The ID column can't be deleted or displaced.
 - Full undo/redo.
+
+## Collapsing sections
+
+A `#` or `##` header owns every row beneath it up to the next header of the
+same or higher level — so collapsing `# Enemies` folds its `## Forest` and
+`## Caves` subsections away with it, while collapsing `## Forest` leaves
+`## Caves` alone. `###` comment rows fold along with the content around them.
+
+- Click the **disclosure triangle** at the left of a header's row number.
+  ⌥-click folds the subsections nested inside it too.
+- Sheet menu: **Collapse / Expand Section** (⌥⌘← / ⌥⌘→) act on the section
+  the cursor is in; **Collapse / Expand All Sections** (⌥⇧⌘← / ⌥⇧⌘→) act on
+  the whole sheet. Both pairs are also on the right-click menu.
+- Folded rows are hidden, not changed — **the TSV on disk is untouched**.
+  The skipped row numbers and a firm line under the header mark the seam.
+- Arrow keys step over a folded section in one press, and the cursor is never
+  left inside one. Autofill drags stop at a fold rather than writing into
+  cells you can't see. Cross-file ID jumps and ⇧⌘D unfold whatever is hiding
+  the row they land on.
+- Collapse state lives in the `.tss` sidecar, so it survives reopening and
+  follows its header when you drag-reorder rows. Editing the `#` off a header
+  always brings its rows back.
 
 ## Column data types
 
@@ -111,12 +134,17 @@ v0 wire format — one tab-separated record per line:
 tss	0
 colwidth	<columnIndex>	<points>
 rowheight	<rowIndex>	<points>
+coltype	<columnIndex>	raw|integer|float|text
+collapsed	<headerRowIndex>	1
 freeze	fieldrow|idcol	0|1
 ```
 
-The UI writes column widths (drag-resize a column) and the freeze toggles
-today; freeze records are only written when a pane is un-frozen, since frozen
-is the default. Unknown record types are preserved verbatim on rewrite, so future
+The UI writes column widths (drag-resize a column), column types, collapsed
+sections and the freeze toggles today; freeze records are only written when a
+pane is un-frozen, since frozen is the default, and `raw` column types are
+never written. Per-row records (`rowheight`, `collapsed`) are re-keyed when
+rows are inserted, deleted or reordered, so they stay attached to their
+content. Unknown record types are preserved verbatim on rewrite, so future
 fields — cell styles, merged headers, calculated columns — can be added in
 `TSSFormat.swift` without breaking older files. That's the extension point:
 add a record type to `parse`/`serialize` and consume it in
@@ -126,7 +154,7 @@ add a record type to `parse`/`serialize` and consume it in
 
 ```
 Sources/TSVee/
-  SpreadsheetModel.swift        the TSV grid: parsing, mutations, undo, unique-ID checks
+  SpreadsheetModel.swift        the TSV grid: parsing, mutations, undo, unique-ID checks, section ranges
   TSSFormat.swift               the .tss sidecar (stub v0)
   TSVDocument.swift             NSDocument glue: read/write TSV + sidecar
   SpreadsheetView.swift         custom-drawn grid (only visible cells render — big files stay fast)
@@ -141,4 +169,4 @@ Tests/TSVeeTests/               model + TSS unit tests
 
 - Row-height drag-resize (the model + `.tss` already support it)
 - Find & replace, sort-within-section
-- `.tss`: cell styles, column types, calculated columns
+- `.tss`: cell styles, calculated columns

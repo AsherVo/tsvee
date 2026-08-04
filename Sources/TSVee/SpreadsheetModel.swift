@@ -85,6 +85,54 @@ final class SpreadsheetModel {
 
     func isFieldNameRow(_ row: Int) -> Bool { row == 0 && hasFieldNameRow }
 
+    // MARK: - Sections
+
+    /// Header levels that open a collapsible section. "###" (or more) is a
+    /// comment row, not a section: it neither collapses nor closes the section
+    /// it sits in.
+    static let sectionHeaderLevels = 1...2
+
+    /// The rows belonging to the section a header row opens: everything below
+    /// it up to (but not including) the next header of the same or higher
+    /// level — so a "#" section swallows its "##" subsections, and a "##"
+    /// section ends at the next "##" or "#". "###" comment rows are carried
+    /// along as ordinary content.
+    ///
+    /// nil when the row doesn't open a section, or opens nothing (the next row
+    /// is already a sibling/parent header, or the header is the last row).
+    func sectionBody(ofRow row: Int) -> ClosedRange<Int>? {
+        let level = headerLevel(ofRow: row)
+        guard Self.sectionHeaderLevels.contains(level) else { return nil }
+        var end = row
+        var next = row + 1
+        while next < rows.count {
+            let nextLevel = headerLevel(ofRow: next)
+            if nextLevel > 0 && nextLevel <= level { break }
+            end = next
+            next += 1
+        }
+        return end > row ? (row + 1)...end : nil
+    }
+
+    /// The innermost section header that owns a row — the row itself when it
+    /// opens a section, otherwise the nearest one above it. "###" comment rows
+    /// are skipped over, since they don't open sections.
+    func enclosingSectionHeader(ofRow row: Int) -> Int? {
+        guard row < rows.count else { return nil }
+        for candidate in stride(from: min(row, rows.count - 1), through: 0, by: -1)
+        where Self.sectionHeaderLevels.contains(headerLevel(ofRow: candidate)) {
+            // The nearest section header above always owns the row: nothing
+            // between them can have closed the section.
+            return sectionBody(ofRow: candidate) != nil ? candidate : nil
+        }
+        return nil
+    }
+
+    /// Every row that opens a non-empty section, in order.
+    func sectionHeaderRows() -> [Int] {
+        (0..<rows.count).filter { sectionBody(ofRow: $0) != nil }
+    }
+
     /// First row whose ID matches exactly (used for cross-file navigation).
     /// The field-name row doesn't count.
     func firstRow(withID id: String) -> Int? {
@@ -279,6 +327,19 @@ final class SpreadsheetModel {
             for i in destination..<range.lowerBound { mapping[i] = i + count }
         }
         return mapping
+    }
+
+    /// Where per-row state (a `.tss` height, a collapsed section) lands after a
+    /// row is inserted at `insertion`.
+    static func shiftedRowIndex(_ index: Int, afterInsertAt insertion: Int) -> Int {
+        index >= insertion ? index + 1 : index
+    }
+
+    /// Where per-row state lands after `removed` rows are deleted — nil when
+    /// the row it was attached to is one of them.
+    static func shiftedRowIndex(_ index: Int, afterRemoving removed: IndexSet) -> Int? {
+        guard !removed.contains(index) else { return nil }
+        return index - removed.count(in: 0..<index)
     }
 
     // MARK: - Unique-ID enforcement

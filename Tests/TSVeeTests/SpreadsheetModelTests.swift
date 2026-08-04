@@ -72,6 +72,100 @@ final class SpreadsheetModelTests: XCTestCase {
         XCTAssertEqual(model.headerLevel(ofRow: 5), 0)
     }
 
+    // MARK: - Sections
+
+    /// Mirrors Samples/enemies.tsv: nested "#" / "##" / "###" sections.
+    private func makeSectionedModel() -> SpreadsheetModel {
+        makeModel("""
+        ID\tName
+        # Enemies\t
+        ## Forest\t
+        slime_green\tGreen Slime
+        slime_red\tRed Slime
+        ### Boss\t
+        forest_guardian\tForest Guardian
+        ## Caves\t
+        bat_cave\tCave Bat
+        crimson\tCrimson Slime
+        # Items\t
+        potion_small\tSmall Potion
+        """)
+    }
+
+    func testSectionBodyStopsAtSameOrHigherLevel() {
+        let model = makeSectionedModel()
+        // "#" swallows its subsections, and runs to the next "#".
+        XCTAssertEqual(model.sectionBody(ofRow: 1), 2...9)
+        // "## Forest" ends at "## Caves", carrying its "### Boss" comment.
+        XCTAssertEqual(model.sectionBody(ofRow: 2), 3...6)
+        XCTAssertEqual(model.sectionBody(ofRow: 7), 8...9)
+        // A trailing section runs to the last row.
+        XCTAssertEqual(model.sectionBody(ofRow: 10), 11...11)
+        // The field-name row and data rows open nothing.
+        XCTAssertNil(model.sectionBody(ofRow: 0))
+        XCTAssertNil(model.sectionBody(ofRow: 3))
+    }
+
+    func testCommentRowsAreNotSections() {
+        let model = makeSectionedModel()
+        // "### Boss" is a comment row: it opens no section of its own...
+        XCTAssertEqual(model.headerLevel(ofRow: 5), 3)
+        XCTAssertNil(model.sectionBody(ofRow: 5))
+        // ...and doesn't close the "##" section it sits in (row 6 is inside it).
+        XCTAssertEqual(model.sectionBody(ofRow: 2), 3...6)
+        // "####" and deeper clamp to level 3, so they're comments too.
+        let deep = makeModel("# One\n#### Deep\nx")
+        XCTAssertNil(deep.sectionBody(ofRow: 1))
+        XCTAssertEqual(deep.sectionBody(ofRow: 0), 1...2)
+    }
+
+    func testEmptySectionsHaveNoBody() {
+        // Back-to-back headers, and a header as the very last row.
+        let model = makeModel("# A\n# B\nx\n# Trailing")
+        XCTAssertNil(model.sectionBody(ofRow: 0))
+        XCTAssertEqual(model.sectionBody(ofRow: 1), 2...2)
+        XCTAssertNil(model.sectionBody(ofRow: 3))
+        XCTAssertEqual(model.sectionHeaderRows(), [1])
+    }
+
+    func testSectionHeaderRows() {
+        // Row 5 ("### Boss") is a comment, so it isn't listed.
+        XCTAssertEqual(makeSectionedModel().sectionHeaderRows(), [1, 2, 7, 10])
+    }
+
+    func testEnclosingSectionHeaderIsTheInnermostOne() {
+        let model = makeSectionedModel()
+        XCTAssertEqual(model.enclosingSectionHeader(ofRow: 4), 2)     // in "## Forest"
+        // Below a "###" comment: skips it for the real section header above.
+        XCTAssertEqual(model.enclosingSectionHeader(ofRow: 6), 2)
+        XCTAssertEqual(model.enclosingSectionHeader(ofRow: 5), 2)
+        XCTAssertEqual(model.enclosingSectionHeader(ofRow: 9), 7)     // in "## Caves"
+        XCTAssertEqual(model.enclosingSectionHeader(ofRow: 11), 10)
+        // A header row owns itself.
+        XCTAssertEqual(model.enclosingSectionHeader(ofRow: 2), 2)
+        // Nothing above the first header.
+        XCTAssertNil(model.enclosingSectionHeader(ofRow: 0))
+    }
+
+    // MARK: - Per-row state follows its content
+
+    func testShiftedRowIndexAfterInsert() {
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(2, afterInsertAt: 3), 2)
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(3, afterInsertAt: 3), 4)
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(5, afterInsertAt: 3), 6)
+    }
+
+    func testShiftedRowIndexAfterRemoval() {
+        let removed = IndexSet([1, 3])
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(0, afterRemoving: removed), 0)
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(2, afterRemoving: removed), 1)
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(4, afterRemoving: removed), 2)
+        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(5, afterRemoving: removed), 3)
+        // State on a deleted row is dropped, not relocated.
+        XCTAssertNil(SpreadsheetModel.shiftedRowIndex(1, afterRemoving: removed))
+        XCTAssertNil(SpreadsheetModel.shiftedRowIndex(3, afterRemoving: removed))
+    }
+
     // MARK: - Undo
 
     func testUndoRedoOfCellEdit() {
