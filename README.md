@@ -92,8 +92,10 @@ Right-click a column (header or any cell) → **Column Data Type**:
 - **Raw** (default) — plain left-aligned strings, exactly as on disk.
 - **Integer** / **Float** — right-aligned; values that don't parse are shown
   in red so bad data is obvious at a glance. Nothing is ever rewritten.
-- **Text** — word-wrapped display with spell-checking while editing; rows
-  grow automatically to fit the tallest text cell.
+- **Text** — word-wrapped display; rows grow automatically to fit the tallest
+  text cell. Misspellings get a red squiggle in the grid (not just while
+  editing), and right-clicking one offers corrections plus **Ignore
+  Spelling** / **Learn Spelling**.
 
 Types are per-column formatting, stored in the `.tss` sidecar, and they
 follow their column when you drag-reorder. Header (`#`) rows and the

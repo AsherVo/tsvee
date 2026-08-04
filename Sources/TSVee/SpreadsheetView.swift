@@ -122,6 +122,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var didDragSinceMouseDown = false
     private var pendingHeaderReselect: (() -> Void)?
 
+    /// Spell checking + wrapped-text rendering for `text` columns.
+    private let spellIndex = SpellCheckIndex()
+    private let textRenderer = TextCellRenderer()
+
     /// Live fill-handle drag target (the cells that will be written).
     private var fillTarget: (rows: ClosedRange<Int>, cols: ClosedRange<Int>, direction: FillDirection)?
     /// Live row/column move insertion boundary (pre-move index), nil = invalid.
@@ -134,6 +138,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     override var acceptsFirstResponder: Bool { true }
     override class var isCompatibleWithResponsiveScrolling: Bool { false }
     override var undoManager: UndoManager? { model?.undoManager }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        // A finished spell check can add squiggles to cells already on screen.
+        spellIndex.onUpdate = { [weak self] in self?.needsDisplay = true }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is unused") }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -452,13 +464,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
                 switch type {
                 case .text:
-                    let style = NSMutableParagraphStyle()
-                    style.lineBreakMode = .byWordWrapping
-                    text.draw(in: rect.insetBy(dx: 6, dy: 4), withAttributes: [
-                        .font: font,
-                        .foregroundColor: rowColor,
-                        .paragraphStyle: style,
-                    ])
+                    // Prose: wrapped, and spell-checked with the misspellings
+                    // underlined the way a text view would.
+                    textRenderer.draw(text, font: font, color: rowColor,
+                                      in: rect.insetBy(dx: 6, dy: 4),
+                                      misspellings: spellIndex.misspellings(in: text))
                 case .integer, .float:
                     let valid = type == .integer ? Int(text) != nil : Double(text) != nil
                     let attrs: [NSAttributedString.Key: Any] = [
@@ -1201,8 +1211,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if pos.col < frozenColCount { frame.origin.x += vis.minX }
         if pos.row < frozenRowCount { frame.origin.y += vis.minY }
 
-        let isTextColumn = cachedTypes[pos.col] == .text
-            && model.headerLevel(ofRow: pos.row) == 0 && !model.isFieldNameRow(pos.row)
+        let isTextColumn = isTextCell(pos)
 
         let field = NSTextField(frame: frame)
         field.font = cellFont(forRow: pos.row, column: pos.col)
@@ -1230,8 +1239,26 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         window?.makeFirstResponder(field)
         if let fieldEditor = field.currentEditor() {
             fieldEditor.selectedRange = NSRange(location: field.stringValue.count, length: 0)
-            if isTextColumn, let textView = fieldEditor as? NSTextView {
-                textView.isContinuousSpellCheckingEnabled = true
+            if let textView = fieldEditor as? NSTextView {
+                // The window's field editor is shared between cells, so both
+                // states have to be set — otherwise spell checking turned on
+                // for a text column follows you into an ID or number column.
+                textView.isContinuousSpellCheckingEnabled = isTextColumn
+                textView.isGrammarCheckingEnabled = false
+                // Never silently rewrite data on the way in.
+                textView.isAutomaticSpellingCorrectionEnabled = false
+                textView.isAutomaticTextReplacementEnabled = false
+                textView.isAutomaticQuoteSubstitutionEnabled = false
+                textView.isAutomaticDashSubstitutionEnabled = false
+                // Continuous checking only marks text as it changes, so seed the
+                // squiggles the grid already knows about — otherwise clicking
+                // into a cell makes them vanish until the next keystroke.
+                if isTextColumn, initialText == nil {
+                    for range in spellIndex.misspellings(in: field.stringValue) {
+                        textView.setSpellingState(
+                            NSAttributedString.SpellingState.spelling.rawValue, range: range)
+                    }
+                }
             }
         }
         needsDisplay = true
@@ -1600,11 +1627,102 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         selectionDidChange()
     }
 
+    // MARK: - Spelling
+
+    /// True for a cell that holds prose: a `text` column in a plain data row
+    /// (headers and the field-name row ignore column types).
+    private func isTextCell(_ pos: GridPos) -> Bool {
+        guard let model, cachedTypes[pos.col] == .text else { return false }
+        return model.headerLevel(ofRow: pos.row) == 0 && !model.isFieldNameRow(pos.row)
+    }
+
+    /// Where a cell's text is actually drawn, frozen panes included.
+    private func textAreaScreenRect(_ pos: GridPos) -> NSRect {
+        let vis = visibleRect
+        var rect = cellRect(pos.row, pos.col).insetBy(dx: 6, dy: 4)
+        if pos.col < frozenColCount { rect.origin.x += vis.minX }
+        if pos.row < frozenRowCount { rect.origin.y += vis.minY }
+        return rect
+    }
+
+    /// The misspelled word under a click, if the click landed on one.
+    private func misspelling(at p: NSPoint, in pos: GridPos) -> SpellingFix? {
+        guard let model, isTextCell(pos),
+              pos.row < model.rowCount, pos.col < model.columnCount else { return nil }
+        let text = model.value(row: pos.row, column: pos.col)
+        let misspellings = spellIndex.misspellings(in: text)
+        guard !misspellings.isEmpty else { return nil }
+        guard let index = textRenderer.characterIndex(
+            in: text, font: cellFont(forRow: pos.row, column: pos.col),
+            rect: textAreaScreenRect(pos), at: p) else { return nil }
+        guard let range = misspellings.first(where: { NSLocationInRange(index, $0) }) else { return nil }
+        return SpellingFix(pos: pos, range: range,
+                           word: (text as NSString).substring(with: range),
+                           replacement: nil)
+    }
+
+    /// Guesses + Learn / Ignore for the right-clicked misspelling, mirroring the
+    /// spelling section of a text view's context menu.
+    private func addSpellingItems(for hit: SpellingFix, to menu: NSMenu) {
+        guard let model else { return }
+        let text = model.value(row: hit.pos.row, column: hit.pos.col)
+        let guesses = NSSpellChecker.shared.guesses(
+            forWordRange: hit.range, in: text, language: nil,
+            inSpellDocumentWithTag: spellIndex.documentTag) ?? []
+
+        if guesses.isEmpty {
+            let none = NSMenuItem(title: "No Guesses Found", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
+        for guess in guesses {
+            let item = NSMenuItem(title: guess, action: #selector(correctSpelling(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = SpellingFix(pos: hit.pos, range: hit.range,
+                                                 word: hit.word, replacement: guess)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for (title, action) in [("Ignore Spelling", #selector(ignoreSpelling(_:))),
+                                ("Learn Spelling", #selector(learnSpelling(_:)))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.representedObject = hit
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+    }
+
+    @objc private func correctSpelling(_ sender: NSMenuItem) {
+        guard let fix = sender.representedObject as? SpellingFix,
+              let replacement = fix.replacement, let model else { return }
+        let text = model.value(row: fix.pos.row, column: fix.pos.col) as NSString
+        // The cell may have been edited between the right-click and the pick.
+        guard fix.range.upperBound <= text.length,
+              text.substring(with: fix.range) == fix.word else { return }
+        model.setValue(text.replacingCharacters(in: fix.range, with: replacement),
+                       row: fix.pos.row, column: fix.pos.col)
+        needsDisplay = true
+    }
+
+    @objc private func ignoreSpelling(_ sender: NSMenuItem) {
+        guard let fix = sender.representedObject as? SpellingFix else { return }
+        NSSpellChecker.shared.ignoreWord(fix.word, inSpellDocumentWithTag: spellIndex.documentTag)
+        spellIndex.invalidateAll()
+    }
+
+    @objc private func learnSpelling(_ sender: NSMenuItem) {
+        guard let fix = sender.representedObject as? SpellingFix else { return }
+        NSSpellChecker.shared.learnWord(fix.word)
+        spellIndex.invalidateAll()
+    }
+
     // MARK: - Context menu & validation
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
         var contextRow: Int?
+        var spellingHit: SpellingFix?
         switch hitArea(at: p) {
         case .cell(let pos):
             if !(selectedRows.contains(pos.row) && selectedCols.contains(pos.col)) {
@@ -1613,6 +1731,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 selectionDidChange()
             }
             contextRow = pos.row
+            spellingHit = misspelling(at: p, in: pos)
         case .rowHeader(let r), .sectionToggle(let r):
             if !(isFullRowSelection && selectedRows.contains(r)) {
                 selectRow(r, extend: false)
@@ -1627,6 +1746,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         let menu = NSMenu()
+
+        // Spelling first, where the click was on a misspelled word — that's
+        // where a text view puts it, and it's what the click was aimed at.
+        if let spellingHit {
+            addSpellingItems(for: spellingHit, to: menu)
+        }
 
         // "Go to <ID> in <other sheet>" — same ID in other open files.
         if let model, let row = contextRow, row < model.rowCount {
