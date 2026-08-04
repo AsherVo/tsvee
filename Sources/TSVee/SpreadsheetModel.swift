@@ -211,6 +211,66 @@ final class SpreadsheetModel {
         onChange?()
     }
 
+    // MARK: - Reordering
+
+    /// Moves a contiguous block of rows so it starts at the given insertion
+    /// boundary (expressed in pre-move indices, outside the block).
+    func moveRows(_ range: ClosedRange<Int>, to destination: Int) {
+        guard range.lowerBound >= 0, range.upperBound < rows.count,
+              destination >= 0, destination <= rows.count,
+              destination < range.lowerBound || destination > range.upperBound + 1 else { return }
+        let block = Array(rows[range])
+        rows.removeSubrange(range)
+        let adjusted = destination > range.upperBound ? destination - block.count : destination
+        rows.insert(contentsOf: block, at: adjusted)
+
+        let newRange = adjusted...(adjusted + block.count - 1)
+        let inverseDestination = destination > range.upperBound ? range.lowerBound : range.upperBound + 1
+        undoManager?.registerUndo(withTarget: self) { model in
+            model.moveRows(newRange, to: inverseDestination)
+        }
+        undoManager?.setActionName("Move Rows")
+        recomputeDuplicates()
+        onChange?()
+    }
+
+    /// Moves a contiguous block of columns. The ID column (0) can neither
+    /// move nor be displaced.
+    func moveColumns(_ range: ClosedRange<Int>, to destination: Int) {
+        guard range.lowerBound >= 1, range.upperBound < columnCount,
+              destination >= 1, destination <= columnCount,
+              destination < range.lowerBound || destination > range.upperBound + 1 else { return }
+        let adjusted = destination > range.upperBound ? destination - range.count : destination
+        for i in rows.indices {
+            let block = Array(rows[i][range])
+            rows[i].removeSubrange(range)
+            rows[i].insert(contentsOf: block, at: adjusted)
+        }
+
+        let newRange = adjusted...(adjusted + range.count - 1)
+        let inverseDestination = destination > range.upperBound ? range.lowerBound : range.upperBound + 1
+        undoManager?.registerUndo(withTarget: self) { model in
+            model.moveColumns(newRange, to: inverseDestination)
+        }
+        undoManager?.setActionName("Move Columns")
+        onChange?()
+    }
+
+    /// old index → new index for every index a move displaces. Used to keep
+    /// per-index formatting (.tss widths/heights) attached to its content.
+    static func moveMapping(range: ClosedRange<Int>, to destination: Int) -> [Int: Int] {
+        var mapping: [Int: Int] = [:]
+        let count = range.count
+        if destination > range.upperBound + 1 {
+            for i in range { mapping[i] = i + (destination - range.upperBound - 1) }
+            for i in (range.upperBound + 1)..<destination { mapping[i] = i - count }
+        } else if destination < range.lowerBound {
+            for i in range { mapping[i] = i - (range.lowerBound - destination) }
+            for i in destination..<range.lowerBound { mapping[i] = i + count }
+        }
+        return mapping
+    }
+
     // MARK: - Unique-ID enforcement
 
     private func recomputeDuplicates() {

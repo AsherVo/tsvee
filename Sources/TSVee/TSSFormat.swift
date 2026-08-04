@@ -20,11 +20,16 @@ struct TSSFormat {
     var columnWidths: [Int: CGFloat] = [:]
     var rowHeights: [Int: CGFloat] = [:]
 
+    /// Frozen panes. Both default to true; only deviations are persisted.
+    var freezeFieldRow = true
+    var freezeIDColumn = true
+
     /// Records from a newer/unknown TSS version, preserved on rewrite.
     private var unknownRecords: [String] = []
 
     var hasCustomFormatting: Bool {
         !columnWidths.isEmpty || !rowHeights.isEmpty || !unknownRecords.isEmpty
+            || !freezeFieldRow || !freezeIDColumn
     }
 
     // MARK: - Sidecar location
@@ -57,6 +62,12 @@ struct TSSFormat {
                 if let index = Int(fields[1]), let height = Double(fields[2]), height > 0 {
                     format.rowHeights[index] = CGFloat(height)
                 }
+            case "freeze" where fields.count >= 3:
+                switch fields[1] {
+                case "fieldrow": format.freezeFieldRow = fields[2] != "0"
+                case "idcol": format.freezeIDColumn = fields[2] != "0"
+                default: format.unknownRecords.append(line)
+                }
             default:
                 format.unknownRecords.append(line)
             }
@@ -74,6 +85,8 @@ struct TSSFormat {
         for (index, height) in rowHeights.sorted(by: { $0.key < $1.key }) {
             lines.append("rowheight\t\(index)\t\(Int(height.rounded()))")
         }
+        if !freezeFieldRow { lines.append("freeze\tfieldrow\t0") }
+        if !freezeIDColumn { lines.append("freeze\tidcol\t0") }
         lines.append(contentsOf: unknownRecords)
         return lines.joined(separator: "\n") + "\n"
     }

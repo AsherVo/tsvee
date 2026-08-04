@@ -37,6 +37,16 @@ bundle` app carries).
 
 - Column letters / row numbers, accent-colored range selection, a formula bar
   with an `A1` name box that edits the raw cell value.
+- **Frozen panes**: the field-name row and the ID column stay pinned while you
+  scroll (both on by default; toggle in the View menu, persisted via `.tss`).
+- **Fill handle**: drag the circle at the selection's bottom-right corner to
+  autofill. A single cell copies; numeric runs continue the series (`1, 2 →
+  3, 4`); IDs with trailing numbers increment and keep their zero-padding
+  (`slime_01, slime_02 → slime_03`); anything else repeats the pattern.
+- **Drag to reorder**: select whole rows/columns via their headers, then grab
+  the selected header (cursor becomes a hand) and drag to move the block —
+  multi-row/column selections move together, and `.tss` widths/heights follow
+  their columns/rows. The ID column stays put.
 - Type into a selected cell to start editing; **Enter** commits and moves
   down (⇧Enter up), **Tab** right (⇧Tab left), **Esc** cancels. Double-click
   or Enter to edit in place. Arrow keys navigate; ⇧-arrows extend the
@@ -65,10 +75,12 @@ v0 wire format — one tab-separated record per line:
 tss	0
 colwidth	<columnIndex>	<points>
 rowheight	<rowIndex>	<points>
+freeze	fieldrow|idcol	0|1
 ```
 
-Column widths are the only thing the UI writes today (drag-resize a column,
-save). Unknown record types are preserved verbatim on rewrite, so future
+The UI writes column widths (drag-resize a column) and the freeze toggles
+today; freeze records are only written when a pane is un-frozen, since frozen
+is the default. Unknown record types are preserved verbatim on rewrite, so future
 fields — cell styles, merged headers, calculated columns — can be added in
 `TSSFormat.swift` without breaking older files. That's the extension point:
 add a record type to `parse`/`serialize` and consume it in
@@ -91,7 +103,6 @@ Tests/TSVeeTests/               model + TSS unit tests
 
 ## Roadmap
 
-- Freeze the field-name row (and `#` headers?) while scrolling
 - Row-height drag-resize (the model + `.tss` already support it)
 - Find & replace, sort-within-section
 - `.tss`: cell styles, column types, calculated columns

@@ -8,6 +8,7 @@ enum MainMenu {
         main.addItem(submenu(appMenu(), title: "TSVee"))
         main.addItem(submenu(fileMenu(), title: "File"))
         main.addItem(submenu(editMenu(), title: "Edit"))
+        main.addItem(submenu(viewMenu(), title: "View"))
         main.addItem(submenu(sheetMenu(), title: "Sheet"))
         main.addItem(submenu(windowMenu(), title: "Window"))
         return main
@@ -73,6 +74,15 @@ enum MainMenu {
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         menu.addItem(withTitle: "Delete", action: NSSelectorFromString("delete:"), keyEquivalent: "")
         menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        return menu
+    }
+
+    private static func viewMenu() -> NSMenu {
+        let menu = NSMenu(title: "View")
+        menu.addItem(withTitle: "Freeze Column Names Row",
+                     action: NSSelectorFromString("toggleFreezeFieldRow:"), keyEquivalent: "")
+        menu.addItem(withTitle: "Freeze ID Column",
+                     action: NSSelectorFromString("toggleFreezeIDColumn:"), keyEquivalent: "")
         return menu
     }
 

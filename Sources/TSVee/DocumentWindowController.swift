@@ -67,6 +67,19 @@ final class DocumentWindowController: NSWindowController {
 
         wireUp(document: document)
         window.makeFirstResponder(spreadsheetView)
+
+        // Debug/automation hook: `-TSVeeDebugScroll 400,300` scrolls the grid
+        // after launch so scrolled rendering can be screenshot-tested.
+        if let spec = UserDefaults.standard.string(forKey: "TSVeeDebugScroll") {
+            let parts = spec.split(separator: ",").compactMap { Double($0) }
+            if parts.count == 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak scrollView] in
+                    guard let scrollView else { return }
+                    scrollView.contentView.scroll(to: NSPoint(x: parts[0], y: parts[1]))
+                    scrollView.reflectScrolledClipView(scrollView.contentView)
+                }
+            }
+        }
     }
 
     private func wireUp(document: TSVDocument) {

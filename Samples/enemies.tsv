@@ -10,3 +10,5 @@ bat_cave	Cave Bat	6	4	Erratic flight
 slime_red	Crimson Slime	20	5	Duplicate ID on purpose
 # Items				
 potion_small	Small Potion			Heals 20
+				
+a	test			

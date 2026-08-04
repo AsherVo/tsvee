@@ -7,9 +7,16 @@ struct GridPos: Equatable {
 
 /// The grid itself. A single custom-drawn view (only visible cells are ever
 /// drawn) inside an NSScrollView, with Google-Sheets-style chrome: column
-/// letters, row numbers, accent-colored range selection, drag-to-resize
-/// columns, type-to-edit, and phantom rows/columns past the end of the data
-/// that materialize when you edit them.
+/// letters, row numbers, accent-colored range selection, frozen panes for the
+/// field-name row and ID column, a fill handle (autofill), drag-to-move rows
+/// and columns, drag-to-resize columns, type-to-edit, and phantom
+/// rows/columns past the end of the data that materialize when you edit them.
+///
+/// Frozen panes are rendered by drawing the same document-space content up to
+/// four times with different (translation, clip) pairs. Because every frozen
+/// row/column sits at the very start of the document, translating by the
+/// scroll offset pins it to the viewport edge, and the clip guarantees
+/// non-frozen content can never leak into a frozen pane.
 final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Configuration
@@ -25,10 +32,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         static let phantomRows = 200
         static let phantomCols = 26
         static let resizeGrabMargin: CGFloat = 4
+        static let fillHandleGrabMargin: CGFloat = 6
     }
 
     private enum Palette {
         static var gridLine: NSColor { NSColor.separatorColor.withAlphaComponent(0.4) }
+        static var paneEdge: NSColor { NSColor.separatorColor }
         static var chromeBackground: NSColor { .windowBackgroundColor }
         static var chromeText: NSColor { .secondaryLabelColor }
         static var chromeSelected: NSColor { NSColor.controlAccentColor.withAlphaComponent(0.25) }
@@ -61,6 +70,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var cachedWidths: [Int: CGFloat] = [:]
     private var cachedHeights: [Int: CGFloat] = [:]
 
+    /// 1 when the field-name row / ID column is frozen, else 0.
+    private var frozenRowCount = 0
+    private var frozenColCount = 0
+
     private var anchor = GridPos(row: 0, col: 0)
     private var focus = GridPos(row: 0, col: 0)
 
@@ -69,14 +82,26 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var editSessionFromTyping = false
     private var isCommittingEdit = false
 
+    private enum FillDirection { case up, down, left, right }
+
     private enum DragMode {
         case none
         case selectCells
         case selectRows
         case selectColumns
         case resizeColumn(col: Int, startX: CGFloat, startWidth: CGFloat)
+        case fillHandle
+        case moveRows(ClosedRange<Int>)
+        case moveColumns(ClosedRange<Int>)
     }
     private var dragMode: DragMode = .none
+    private var didDragSinceMouseDown = false
+    private var pendingHeaderReselect: (() -> Void)?
+
+    /// Live fill-handle drag target (the cells that will be written).
+    private var fillTarget: (rows: ClosedRange<Int>, cols: ClosedRange<Int>, direction: FillDirection)?
+    /// Live row/column move insertion boundary (pre-move index), nil = invalid.
+    private var moveDropIndex: Int?
 
     // MARK: - View basics
 
@@ -95,6 +120,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     @objc private func clipBoundsChanged() {
+        // A frozen cell's editor is pinned to the viewport, not the document —
+        // scrolling out from under it would strand it, so land the edit.
+        if let cell = editingCell, cell.row < frozenRowCount || cell.col < frozenColCount {
+            commitEdit(thenMove: nil)
+        }
         needsDisplay = true
     }
 
@@ -122,11 +152,18 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         return Metrics.defaultRowHeight
     }
 
+    /// Total height of the sticky top chrome: letter band + frozen row.
+    private var chromeTop: CGFloat { yOffsets[frozenRowCount] }
+    /// Total width of the sticky left chrome: number strip + frozen column.
+    private var chromeLeft: CGFloat { xOffsets[frozenColCount] }
+
     func modelDidChange() {
         guard let model else { return }
         let format = formatProvider?() ?? TSSFormat()
         cachedWidths = format.columnWidths
         cachedHeights = format.rowHeights
+        frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
+        frozenColCount = format.freezeIDColumn ? 1 : 0
         gridRows = model.rowCount + Metrics.phantomRows
         gridCols = model.columnCount + Metrics.phantomCols
         clampSelection()
@@ -150,6 +187,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         NSRect(x: xOffsets[col], y: yOffsets[row],
                width: xOffsets[col + 1] - xOffsets[col],
                height: yOffsets[row + 1] - yOffsets[row])
+    }
+
+    private func rectFor(rows: ClosedRange<Int>, cols: ClosedRange<Int>) -> NSRect {
+        NSRect(x: xOffsets[cols.lowerBound],
+               y: yOffsets[rows.lowerBound],
+               width: xOffsets[cols.upperBound + 1] - xOffsets[cols.lowerBound],
+               height: yOffsets[rows.upperBound + 1] - yOffsets[rows.lowerBound])
     }
 
     /// Index of the row/column containing the given offset (clamped).
@@ -176,6 +220,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     private var selectedRows: ClosedRange<Int> { min(anchor.row, focus.row)...max(anchor.row, focus.row) }
     private var selectedCols: ClosedRange<Int> { min(anchor.col, focus.col)...max(anchor.col, focus.col) }
+    private var isFullRowSelection: Bool { selectedCols == 0...(gridCols - 1) }
+    private var isFullColumnSelection: Bool { selectedRows == 0...(gridRows - 1) }
 
     // MARK: - Cell naming (A1 style)
 
@@ -206,20 +252,58 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard let model, gridRows > 0, gridCols > 0 else { return }
 
         let vis = visibleRect
-        let r0 = rowAt(max(dirtyRect.minY, yOffsets[0]))
-        let r1 = rowAt(min(dirtyRect.maxY, yOffsets[gridRows] - 0.5))
-        let c0 = colAt(max(dirtyRect.minX, xOffsets[0]))
-        let c1 = colAt(min(dirtyRect.maxX, xOffsets[gridCols] - 0.5))
 
-        drawRowBackgrounds(model: model, rows: r0...r1)
-        drawSelectionFill()
-        drawGridLines(rows: r0...r1, cols: c0...c1, in: dirtyRect)
-        drawCellText(model: model, rows: r0...r1, cols: c0...c1)
-        drawSelectionBorder()
-        drawChrome(vis: vis, model: model)
+        // Visible body range (below/right of the sticky chrome).
+        let bodyR0 = max(rowAt(min(max(vis.minY + chromeTop, yOffsets[0]), yOffsets[gridRows] - 0.5)), frozenRowCount)
+        let bodyR1 = rowAt(min(vis.maxY, yOffsets[gridRows] - 0.5))
+        let bodyC0 = max(colAt(min(max(vis.minX + chromeLeft, xOffsets[0]), xOffsets[gridCols] - 0.5)), frozenColCount)
+        let bodyC1 = colAt(min(vis.maxX, xOffsets[gridCols] - 0.5))
+        let bodyRows: ClosedRange<Int>? = bodyR0 <= bodyR1 ? bodyR0...bodyR1 : nil
+        let bodyCols: ClosedRange<Int>? = bodyC0 <= bodyC1 ? bodyC0...bodyC1 : nil
+
+        if let bodyRows, let bodyCols {
+            drawPane(model: model, rows: bodyRows, cols: bodyCols,
+                     translateX: 0, translateY: 0,
+                     clip: NSRect(x: vis.minX + chromeLeft, y: vis.minY + chromeTop,
+                                  width: vis.width - chromeLeft, height: vis.height - chromeTop))
+        }
+        if frozenColCount > 0, let bodyRows {
+            drawPane(model: model, rows: bodyRows, cols: 0...(frozenColCount - 1),
+                     translateX: vis.minX, translateY: 0,
+                     clip: NSRect(x: vis.minX + Metrics.rowHeaderWidth, y: vis.minY + chromeTop,
+                                  width: chromeLeft - Metrics.rowHeaderWidth, height: vis.height - chromeTop))
+        }
+        if frozenRowCount > 0, let bodyCols {
+            drawPane(model: model, rows: 0...(frozenRowCount - 1), cols: bodyCols,
+                     translateX: 0, translateY: vis.minY,
+                     clip: NSRect(x: vis.minX + chromeLeft, y: vis.minY + Metrics.colHeaderHeight,
+                                  width: vis.width - chromeLeft, height: chromeTop - Metrics.colHeaderHeight))
+        }
+        if frozenRowCount > 0 && frozenColCount > 0 {
+            drawPane(model: model, rows: 0...(frozenRowCount - 1), cols: 0...(frozenColCount - 1),
+                     translateX: vis.minX, translateY: vis.minY,
+                     clip: NSRect(x: vis.minX + Metrics.rowHeaderWidth, y: vis.minY + Metrics.colHeaderHeight,
+                                  width: chromeLeft - Metrics.rowHeaderWidth, height: chromeTop - Metrics.colHeaderHeight))
+        }
+
+        drawChrome(vis: vis, model: model, bodyCols: bodyCols, bodyRows: bodyRows)
+        drawMoveIndicator(vis: vis)
     }
 
-    private func drawRowBackgrounds(model: SpreadsheetModel, rows: ClosedRange<Int>) {
+    /// Draws one pane: cell backgrounds, selection, grid lines, text, and
+    /// selection adornments, in document coordinates shifted by the given
+    /// translation and hard-clipped to the pane's viewport region.
+    private func drawPane(model: SpreadsheetModel,
+                          rows: ClosedRange<Int>, cols: ClosedRange<Int>,
+                          translateX: CGFloat, translateY: CGFloat, clip: NSRect) {
+        guard clip.width > 0, clip.height > 0,
+              let context = NSGraphicsContext.current else { return }
+        let cg = context.cgContext
+        cg.saveGState()
+        cg.clip(to: clip)
+        cg.translateBy(x: translateX, y: translateY)
+
+        // Row backgrounds (header tints span the full row).
         let fullWidth = xOffsets[gridCols] - xOffsets[0]
         for r in rows {
             var fill: NSColor?
@@ -237,34 +321,69 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 cellRect(r, 0).fill()
             }
         }
-    }
 
-    private func drawSelectionFill() {
+        // Selection fill.
         Palette.selectionFill.setFill()
-        selectionRect().fill()
-    }
+        rectFor(rows: selectedRows, cols: selectedCols).fill()
 
-    private func selectionRect() -> NSRect {
-        let rows = selectedRows, cols = selectedCols
-        return NSRect(
-            x: xOffsets[cols.lowerBound],
-            y: yOffsets[rows.lowerBound],
-            width: xOffsets[cols.upperBound + 1] - xOffsets[cols.lowerBound],
-            height: yOffsets[rows.upperBound + 1] - yOffsets[rows.lowerBound])
-    }
-
-    private func drawGridLines(rows: ClosedRange<Int>, cols: ClosedRange<Int>, in dirty: NSRect) {
+        // Grid lines.
         Palette.gridLine.setFill()
-        let top = max(dirty.minY, yOffsets[0])
-        let bottom = min(dirty.maxY, yOffsets[gridRows])
-        let left = max(dirty.minX, xOffsets[0])
-        let right = min(dirty.maxX, xOffsets[gridCols])
+        let top = yOffsets[rows.lowerBound], bottom = yOffsets[rows.upperBound + 1]
+        let left = xOffsets[cols.lowerBound], right = xOffsets[cols.upperBound + 1]
         for c in cols.lowerBound...(cols.upperBound + 1) {
             NSRect(x: xOffsets[c] - 0.5, y: top, width: 1, height: bottom - top).fill()
         }
         for r in rows.lowerBound...(rows.upperBound + 1) {
             NSRect(x: left, y: yOffsets[r] - 0.5, width: right - left, height: 1).fill()
         }
+
+        // Text.
+        for r in rows {
+            guard r < model.rowCount else { break }
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: cellFont(forRow: r),
+                .foregroundColor: NSColor.labelColor,
+            ]
+            for c in cols {
+                guard c < model.columnCount else { break }
+                let text = model.value(row: r, column: c)
+                guard !text.isEmpty else { continue }
+                if editingCell == GridPos(row: r, col: c) { continue }
+                let rect = cellRect(r, c)
+                let size = text.size(withAttributes: attrs)
+                cg.saveGState()
+                rect.insetBy(dx: 1, dy: 1).clip()
+                text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
+                          withAttributes: attrs)
+                cg.restoreGState()
+            }
+        }
+
+        // Autofill preview: dashed outline around the cells that will fill.
+        if let target = fillTarget {
+            let path = NSBezierPath(rect: rectFor(rows: target.rows, cols: target.cols).insetBy(dx: 0.5, dy: 0.5))
+            path.setLineDash([4, 3], count: 2, phase: 0)
+            path.lineWidth = 1.5
+            Palette.selectionBorder.withAlphaComponent(0.8).setStroke()
+            path.stroke()
+        }
+
+        // Selection border + fill handle (hidden while editing in-cell).
+        if editor == nil {
+            let rect = rectFor(rows: selectedRows, cols: selectedCols).insetBy(dx: 0.5, dy: 0.5)
+            let path = NSBezierPath(rect: rect)
+            path.lineWidth = 2
+            Palette.selectionBorder.setStroke()
+            path.stroke()
+
+            let handle = NSRect(x: rect.maxX - 4, y: rect.maxY - 4, width: 8, height: 8)
+            NSColor.textBackgroundColor.setFill()
+            NSBezierPath(ovalIn: handle).fill()
+            Palette.selectionBorder.setFill()
+            NSBezierPath(ovalIn: handle.insetBy(dx: 1, dy: 1)).fill()
+        }
+
+        cg.restoreGState()
     }
 
     private func cellFont(forRow row: Int) -> NSFont {
@@ -280,55 +399,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
     }
 
-    private func drawCellText(model: SpreadsheetModel, rows: ClosedRange<Int>, cols: ClosedRange<Int>) {
+    private func drawChrome(vis: NSRect, model: SpreadsheetModel,
+                            bodyCols: ClosedRange<Int>?, bodyRows: ClosedRange<Int>?) {
         guard let context = NSGraphicsContext.current else { return }
-        for r in rows {
-            guard r < model.rowCount else { break }
-            let font = cellFont(forRow: r)
-            let attrs: [NSAttributedString.Key: Any] = [
-                .font: font,
-                .foregroundColor: NSColor.labelColor,
-            ]
-            for c in cols {
-                guard c < model.columnCount else { break }
-                let text = model.value(row: r, column: c)
-                guard !text.isEmpty else { continue }
-                if editingCell == GridPos(row: r, col: c) { continue }
-                let rect = cellRect(r, c)
-                let size = text.size(withAttributes: attrs)
-                context.saveGraphicsState()
-                rect.insetBy(dx: 1, dy: 1).clip()
-                text.draw(
-                    at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
-                    withAttributes: attrs)
-                context.restoreGraphicsState()
-            }
-        }
-    }
-
-    private func drawSelectionBorder() {
-        guard editor == nil else { return }
-        let rect = selectionRect().insetBy(dx: 0.5, dy: 0.5)
-        let path = NSBezierPath(rect: rect)
-        path.lineWidth = 2
-        Palette.selectionBorder.setStroke()
-        path.stroke()
-    }
-
-    private func drawChrome(vis: NSRect, model: SpreadsheetModel) {
+        let cg = context.cgContext
         let headerH = Metrics.colHeaderHeight
         let headerW = Metrics.rowHeaderWidth
         let chromeFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
 
-        // Column letter band (sticky at the top of the viewport).
-        let band = NSRect(x: vis.minX, y: vis.minY, width: vis.width, height: headerH)
-        Palette.chromeBackground.setFill()
-        band.fill()
-
-        let c0 = colAt(max(vis.minX, xOffsets[0]))
-        let c1 = colAt(min(vis.maxX, xOffsets[gridCols] - 0.5))
-        for c in c0...c1 {
-            let rect = NSRect(x: xOffsets[c], y: vis.minY,
+        func drawLetter(_ c: Int, translateX: CGFloat) {
+            let rect = NSRect(x: xOffsets[c] + translateX, y: vis.minY,
                               width: xOffsets[c + 1] - xOffsets[c], height: headerH)
             if selectedCols.contains(c) {
                 Palette.chromeSelected.setFill()
@@ -343,17 +424,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             NSRect(x: rect.maxX - 0.5, y: vis.minY, width: 1, height: headerH).fill()
         }
 
-        // Row number strip (sticky at the left of the viewport).
-        let strip = NSRect(x: vis.minX, y: vis.minY + headerH, width: headerW, height: vis.height - headerH)
-        Palette.chromeBackground.setFill()
-        strip.fill()
-
-        let r0 = rowAt(max(vis.minY, yOffsets[0]))
-        let r1 = rowAt(min(vis.maxY, yOffsets[gridRows] - 0.5))
-        let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
-        for r in r0...r1 {
-            let rect = NSRect(x: vis.minX, y: yOffsets[r], width: headerW, height: height(ofRow: r))
-            guard rect.maxY > vis.minY + headerH else { continue }
+        func drawNumber(_ r: Int, translateY: CGFloat) {
+            let rect = NSRect(x: vis.minX, y: yOffsets[r] + translateY,
+                              width: headerW, height: height(ofRow: r))
             if selectedRows.contains(r) {
                 Palette.chromeSelected.setFill()
                 rect.fill()
@@ -371,15 +444,60 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             NSRect(x: vis.minX, y: rect.maxY - 0.5, width: headerW, height: 1).fill()
         }
 
-        // Corner box.
-        let corner = NSRect(x: vis.minX, y: vis.minY, width: headerW, height: headerH)
+        // Column letter band.
         Palette.chromeBackground.setFill()
-        corner.fill()
+        NSRect(x: vis.minX, y: vis.minY, width: vis.width, height: headerH).fill()
+        if let bodyCols {
+            cg.saveGState()
+            cg.clip(to: NSRect(x: vis.minX + chromeLeft, y: vis.minY,
+                               width: vis.width - chromeLeft, height: headerH))
+            for c in bodyCols { drawLetter(c, translateX: 0) }
+            cg.restoreGState()
+        }
+        for c in 0..<frozenColCount { drawLetter(c, translateX: vis.minX) }
 
-        // Chrome edges.
+        // Row number strip.
+        Palette.chromeBackground.setFill()
+        NSRect(x: vis.minX, y: vis.minY + headerH, width: headerW, height: vis.height - headerH).fill()
+        if let bodyRows {
+            cg.saveGState()
+            cg.clip(to: NSRect(x: vis.minX, y: vis.minY + chromeTop,
+                               width: headerW, height: vis.height - chromeTop))
+            for r in bodyRows { drawNumber(r, translateY: 0) }
+            cg.restoreGState()
+        }
+        for r in 0..<frozenRowCount { drawNumber(r, translateY: vis.minY) }
+
+        // Corner box.
+        Palette.chromeBackground.setFill()
+        NSRect(x: vis.minX, y: vis.minY, width: headerW, height: headerH).fill()
+
+        // Chrome and frozen-pane edges (pane edges slightly stronger).
         Palette.gridLine.setFill()
         NSRect(x: vis.minX, y: vis.minY + headerH - 0.5, width: vis.width, height: 1).fill()
         NSRect(x: vis.minX + headerW - 0.5, y: vis.minY, width: 1, height: vis.height).fill()
+        Palette.paneEdge.setFill()
+        if frozenRowCount > 0 {
+            NSRect(x: vis.minX, y: vis.minY + chromeTop - 1, width: vis.width, height: 1.5).fill()
+        }
+        if frozenColCount > 0 {
+            NSRect(x: vis.minX + chromeLeft - 1, y: vis.minY, width: 1.5, height: vis.height).fill()
+        }
+    }
+
+    private func drawMoveIndicator(vis: NSRect) {
+        guard let drop = moveDropIndex else { return }
+        Palette.selectionBorder.setFill()
+        switch dragMode {
+        case .moveRows:
+            let sticky = drop <= frozenRowCount ? vis.minY : 0
+            NSRect(x: vis.minX, y: yOffsets[drop] + sticky - 1.25, width: vis.width, height: 2.5).fill()
+        case .moveColumns:
+            let sticky = drop <= frozenColCount ? vis.minX : 0
+            NSRect(x: xOffsets[drop] + sticky - 1.25, y: vis.minY, width: 2.5, height: vis.height).fill()
+        default:
+            break
+        }
     }
 
     // MARK: - Hit testing
@@ -391,24 +509,60 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case cell(GridPos)
     }
 
+    /// Column at an on-screen x, honoring the sticky frozen column.
+    private func columnAtScreenX(_ x: CGFloat, vis: NSRect) -> Int {
+        if frozenColCount > 0, x < vis.minX + chromeLeft {
+            return colAt(min(max(x - vis.minX, xOffsets[0]), chromeLeft - 0.5))
+        }
+        return colAt(x)
+    }
+
+    /// Row at an on-screen y, honoring the sticky frozen row.
+    private func rowAtScreenY(_ y: CGFloat, vis: NSRect) -> Int {
+        if frozenRowCount > 0, y < vis.minY + chromeTop {
+            return rowAt(min(max(y - vis.minY, yOffsets[0]), chromeTop - 0.5))
+        }
+        return rowAt(y)
+    }
+
     private func hitArea(at p: NSPoint) -> HitArea {
         let vis = visibleRect
-        let inColumnBand = p.y < vis.minY + Metrics.colHeaderHeight
-        let inRowStrip = p.x < vis.minX + Metrics.rowHeaderWidth
-        if inColumnBand && inRowStrip { return .corner }
-        if inColumnBand {
-            let c = colAt(p.x)
-            // Near a column's right edge (or the previous column's edge)?
-            if abs(p.x - xOffsets[c + 1]) <= Metrics.resizeGrabMargin {
-                return .columnHeader(col: c, resizeEdgeOf: c)
+        if p.y < vis.minY + Metrics.colHeaderHeight {
+            if p.x < vis.minX + Metrics.rowHeaderWidth { return .corner }
+            // Frozen columns' edges are sticky; check them first.
+            for c in 0..<frozenColCount {
+                if abs(p.x - (vis.minX + xOffsets[c + 1])) <= Metrics.resizeGrabMargin {
+                    return .columnHeader(col: c, resizeEdgeOf: c)
+                }
             }
-            if c > 0 && abs(p.x - xOffsets[c]) <= Metrics.resizeGrabMargin {
-                return .columnHeader(col: c, resizeEdgeOf: c - 1)
+            let c = columnAtScreenX(p.x, vis: vis)
+            if c >= frozenColCount {
+                if abs(p.x - xOffsets[c + 1]) <= Metrics.resizeGrabMargin {
+                    return .columnHeader(col: c, resizeEdgeOf: c)
+                }
+                if c > frozenColCount, abs(p.x - xOffsets[c]) <= Metrics.resizeGrabMargin {
+                    return .columnHeader(col: c, resizeEdgeOf: c - 1)
+                }
             }
             return .columnHeader(col: c, resizeEdgeOf: nil)
         }
-        if inRowStrip { return .rowHeader(row: rowAt(p.y)) }
-        return .cell(GridPos(row: rowAt(p.y), col: colAt(p.x)))
+        if p.x < vis.minX + Metrics.rowHeaderWidth {
+            return .rowHeader(row: rowAtScreenY(p.y, vis: vis))
+        }
+        return .cell(GridPos(row: rowAtScreenY(p.y, vis: vis), col: columnAtScreenX(p.x, vis: vis)))
+    }
+
+    /// On-screen rect of the fill handle (selection's bottom-right corner,
+    /// shifted if that corner lives in a frozen pane).
+    private func fillHandleScreenRect() -> NSRect? {
+        guard editor == nil else { return nil }
+        let vis = visibleRect
+        let rect = rectFor(rows: selectedRows, cols: selectedCols)
+        var x = rect.maxX, y = rect.maxY
+        if selectedCols.upperBound < frozenColCount { x += vis.minX }
+        if selectedRows.upperBound < frozenRowCount { y += vis.minY }
+        let m = Metrics.fillHandleGrabMargin
+        return NSRect(x: x - m, y: y - m, width: m * 2, height: m * 2)
     }
 
     // MARK: - Mouse
@@ -418,6 +572,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         window?.makeFirstResponder(self)
         let p = convert(event.locationInWindow, from: nil)
         let shift = event.modifierFlags.contains(.shift)
+        didDragSinceMouseDown = false
+        pendingHeaderReselect = nil
+
+        if let handle = fillHandleScreenRect(), handle.contains(p) {
+            dragMode = .fillHandle
+            return
+        }
 
         switch hitArea(at: p) {
         case .corner:
@@ -426,24 +587,25 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case .columnHeader(let c, let resizeEdge):
             if let edge = resizeEdge {
                 dragMode = .resizeColumn(col: edge, startX: p.x, startWidth: width(ofColumn: edge))
+            } else if !shift, isFullColumnSelection, selectedCols.contains(c), !selectedCols.contains(0) {
+                // Grabbing an already-selected header moves the selection.
+                dragMode = .moveColumns(selectedCols)
+                pendingHeaderReselect = { [weak self] in self?.selectColumn(c, extend: false) }
+                NSCursor.closedHand.set()
             } else {
-                if shift { focus = GridPos(row: gridRows - 1, col: c) }
-                else {
-                    anchor = GridPos(row: 0, col: c)
-                    focus = GridPos(row: gridRows - 1, col: c)
-                }
+                selectColumn(c, extend: shift)
                 dragMode = .selectColumns
-                selectionDidChange()
             }
 
         case .rowHeader(let r):
-            if shift { focus = GridPos(row: r, col: gridCols - 1) }
-            else {
-                anchor = GridPos(row: r, col: 0)
-                focus = GridPos(row: r, col: gridCols - 1)
+            if !shift, isFullRowSelection, selectedRows.contains(r) {
+                dragMode = .moveRows(selectedRows)
+                pendingHeaderReselect = { [weak self] in self?.selectRow(r, extend: false) }
+                NSCursor.closedHand.set()
+            } else {
+                selectRow(r, extend: shift)
+                dragMode = .selectRows
             }
-            dragMode = .selectRows
-            selectionDidChange()
 
         case .cell(let pos):
             if shift {
@@ -460,45 +622,270 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
     }
 
+    private func selectColumn(_ c: Int, extend: Bool) {
+        if extend {
+            focus = GridPos(row: gridRows - 1, col: c)
+        } else {
+            anchor = GridPos(row: 0, col: c)
+            focus = GridPos(row: gridRows - 1, col: c)
+        }
+        selectionDidChange()
+    }
+
+    private func selectRow(_ r: Int, extend: Bool) {
+        if extend {
+            focus = GridPos(row: r, col: gridCols - 1)
+        } else {
+            anchor = GridPos(row: r, col: 0)
+            focus = GridPos(row: r, col: gridCols - 1)
+        }
+        selectionDidChange()
+    }
+
     override func mouseDragged(with event: NSEvent) {
+        didDragSinceMouseDown = true
         autoscroll(with: event)
         let p = convert(event.locationInWindow, from: nil)
+        let vis = visibleRect
+
         switch dragMode {
         case .none:
             break
+
         case .selectCells:
-            focus = GridPos(row: rowAt(p.y), col: colAt(p.x))
+            focus = GridPos(row: rowAtScreenY(p.y, vis: vis), col: columnAtScreenX(p.x, vis: vis))
             selectionDidChange()
+
         case .selectRows:
-            focus = GridPos(row: rowAt(p.y), col: gridCols - 1)
+            focus = GridPos(row: rowAtScreenY(p.y, vis: vis), col: gridCols - 1)
             selectionDidChange()
+
         case .selectColumns:
-            focus = GridPos(row: gridRows - 1, col: colAt(p.x))
+            focus = GridPos(row: gridRows - 1, col: columnAtScreenX(p.x, vis: vis))
             selectionDidChange()
+
         case .resizeColumn(let col, let startX, let startWidth):
-            let newWidth = max(Metrics.minColWidth, startWidth + (p.x - startX))
-            cachedWidths[col] = newWidth
+            cachedWidths[col] = max(Metrics.minColWidth, startWidth + (p.x - startX))
             rebuildOffsets()
+            needsDisplay = true
+
+        case .fillHandle:
+            updateFillTarget(pointer: p)
+            NSCursor.crosshair.set()
+
+        case .moveRows(let range):
+            guard let model else { break }
+            let r = rowAt(p.y)
+            let mid = (yOffsets[r] + yOffsets[r + 1]) / 2
+            var idx = p.y > mid ? r + 1 : r
+            idx = min(max(idx, frozenRowCount), model.rowCount)
+            moveDropIndex = (idx < range.lowerBound || idx > range.upperBound + 1) ? idx : nil
+            NSCursor.closedHand.set()
+            needsDisplay = true
+
+        case .moveColumns(let range):
+            guard let model else { break }
+            let c = colAt(p.x)
+            let mid = (xOffsets[c] + xOffsets[c + 1]) / 2
+            var idx = p.x > mid ? c + 1 : c
+            idx = min(max(idx, max(frozenColCount, 1)), model.columnCount)
+            moveDropIndex = (idx < range.lowerBound || idx > range.upperBound + 1) ? idx : nil
+            NSCursor.closedHand.set()
             needsDisplay = true
         }
     }
 
     override func mouseUp(with event: NSEvent) {
-        if case .resizeColumn(let col, _, _) = dragMode, let finalWidth = cachedWidths[col] {
-            onFormatChange? { format in
-                format.columnWidths[col] = finalWidth
+        switch dragMode {
+        case .resizeColumn(let col, _, _):
+            if let finalWidth = cachedWidths[col] {
+                onFormatChange? { format in
+                    format.columnWidths[col] = finalWidth
+                }
             }
+
+        case .fillHandle:
+            if let target = fillTarget {
+                applyFill(target: target)
+            }
+            fillTarget = nil
+            needsDisplay = true
+
+        case .moveRows(let range):
+            defer { moveDropIndex = nil; needsDisplay = true }
+            if !didDragSinceMouseDown {
+                pendingHeaderReselect?()
+                break
+            }
+            if let model, let drop = moveDropIndex, range.upperBound < model.rowCount {
+                remapRowHeights(SpreadsheetModel.moveMapping(range: range, to: drop))
+                model.moveRows(range, to: drop)
+                let newStart = drop > range.upperBound ? drop - range.count : drop
+                anchor = GridPos(row: newStart, col: 0)
+                focus = GridPos(row: newStart + range.count - 1, col: gridCols - 1)
+                selectionDidChange()
+            }
+
+        case .moveColumns(let range):
+            defer { moveDropIndex = nil; needsDisplay = true }
+            if !didDragSinceMouseDown {
+                pendingHeaderReselect?()
+                break
+            }
+            if let model, let drop = moveDropIndex, range.upperBound < model.columnCount {
+                remapColumnWidths(SpreadsheetModel.moveMapping(range: range, to: drop))
+                model.moveColumns(range, to: drop)
+                let newStart = drop > range.upperBound ? drop - range.count : drop
+                anchor = GridPos(row: 0, col: newStart)
+                focus = GridPos(row: gridRows - 1, col: newStart + range.count - 1)
+                selectionDidChange()
+            }
+
+        default:
+            break
         }
         dragMode = .none
+        pendingHeaderReselect = nil
+        window?.invalidateCursorRects(for: self)
     }
 
     override func mouseMoved(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if case .columnHeader(_, .some) = hitArea(at: p) {
-            NSCursor.resizeLeftRight.set()
-        } else {
+        if let handle = fillHandleScreenRect(), handle.contains(p) {
+            NSCursor.crosshair.set()
+            return
+        }
+        switch hitArea(at: p) {
+        case .columnHeader(let c, let resizeEdge):
+            if resizeEdge != nil {
+                NSCursor.resizeLeftRight.set()
+            } else if isFullColumnSelection, selectedCols.contains(c), !selectedCols.contains(0) {
+                NSCursor.openHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        case .rowHeader(let r):
+            if isFullRowSelection, selectedRows.contains(r) {
+                NSCursor.openHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
+        default:
             NSCursor.arrow.set()
         }
+    }
+
+    // MARK: - Autofill (fill handle)
+
+    private func updateFillTarget(pointer p: NSPoint) {
+        let rect = rectFor(rows: selectedRows, cols: selectedCols)
+        let dx = p.x > rect.maxX ? p.x - rect.maxX : (p.x < rect.minX ? p.x - rect.minX : 0)
+        let dy = p.y > rect.maxY ? p.y - rect.maxY : (p.y < rect.minY ? p.y - rect.minY : 0)
+
+        var target: (rows: ClosedRange<Int>, cols: ClosedRange<Int>, direction: FillDirection)?
+        if abs(dy) >= abs(dx), dy != 0 {
+            if dy > 0 {
+                let end = rowAt(p.y)
+                if end > selectedRows.upperBound {
+                    target = ((selectedRows.upperBound + 1)...end, selectedCols, .down)
+                }
+            } else {
+                let start = rowAt(p.y)
+                if start < selectedRows.lowerBound {
+                    target = (start...(selectedRows.lowerBound - 1), selectedCols, .up)
+                }
+            }
+        } else if dx != 0 {
+            if dx > 0 {
+                let end = colAt(p.x)
+                if end > selectedCols.upperBound {
+                    target = (selectedRows, (selectedCols.upperBound + 1)...end, .right)
+                }
+            } else {
+                let start = colAt(p.x)
+                if start < selectedCols.lowerBound {
+                    target = (selectedRows, start...(selectedCols.lowerBound - 1), .left)
+                }
+            }
+        }
+        fillTarget = target
+        needsDisplay = true
+    }
+
+    private func applyFill(target: (rows: ClosedRange<Int>, cols: ClosedRange<Int>, direction: FillDirection)) {
+        guard let model else { return }
+        switch target.direction {
+        case .down:
+            for c in selectedCols {
+                let source = selectedRows.map { model.value(row: $0, column: c) }
+                let values = AutofillSeries.extend(source, count: target.rows.count)
+                for (i, r) in target.rows.enumerated() {
+                    model.setValue(values[i], row: r, column: c)
+                }
+            }
+        case .up:
+            for c in selectedCols {
+                let source = selectedRows.reversed().map { model.value(row: $0, column: c) }
+                let values = AutofillSeries.extend(source, count: target.rows.count)
+                for (i, r) in target.rows.reversed().enumerated() {
+                    model.setValue(values[i], row: r, column: c)
+                }
+            }
+        case .right:
+            for r in selectedRows {
+                let source = selectedCols.map { model.value(row: r, column: $0) }
+                let values = AutofillSeries.extend(source, count: target.cols.count)
+                for (i, c) in target.cols.enumerated() {
+                    model.setValue(values[i], row: r, column: c)
+                }
+            }
+        case .left:
+            for r in selectedRows {
+                let source = selectedCols.reversed().map { model.value(row: r, column: $0) }
+                let values = AutofillSeries.extend(source, count: target.cols.count)
+                for (i, c) in target.cols.reversed().enumerated() {
+                    model.setValue(values[i], row: r, column: c)
+                }
+            }
+        }
+        undoManager?.setActionName("Autofill")
+
+        // Selection grows to cover the filled region, like Sheets.
+        anchor = GridPos(row: min(selectedRows.lowerBound, target.rows.lowerBound),
+                         col: min(selectedCols.lowerBound, target.cols.lowerBound))
+        focus = GridPos(row: max(selectedRows.upperBound, target.rows.upperBound),
+                        col: max(selectedCols.upperBound, target.cols.upperBound))
+        selectionDidChange()
+    }
+
+    // MARK: - Formatting remaps (keep .tss widths/heights on moved rows/cols)
+
+    private func remapColumnWidths(_ mapping: [Int: Int]) {
+        guard !mapping.isEmpty, !(formatProvider?().columnWidths.isEmpty ?? true) else { return }
+        onFormatChange? { format in
+            var updated: [Int: CGFloat] = [:]
+            for (k, v) in format.columnWidths { updated[mapping[k] ?? k] = v }
+            format.columnWidths = updated
+        }
+        let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
+        undoManager?.registerUndo(withTarget: self) { view in
+            view.remapColumnWidths(inverse)
+        }
+        modelDidChange()
+    }
+
+    private func remapRowHeights(_ mapping: [Int: Int]) {
+        guard !mapping.isEmpty, !(formatProvider?().rowHeights.isEmpty ?? true) else { return }
+        onFormatChange? { format in
+            var updated: [Int: CGFloat] = [:]
+            for (k, v) in format.rowHeights { updated[mapping[k] ?? k] = v }
+            format.rowHeights = updated
+        }
+        let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
+        undoManager?.registerUndo(withTarget: self) { view in
+            view.remapRowHeights(inverse)
+        }
+        modelDidChange()
     }
 
     // MARK: - Keyboard
@@ -546,13 +933,25 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     private func scrollCellToVisible(_ pos: GridPos) {
-        // Expand by the chrome size so the cell is never hidden under the
-        // sticky headers.
-        var rect = cellRect(pos.row, pos.col)
-        rect.origin.x -= Metrics.rowHeaderWidth
-        rect.origin.y -= Metrics.colHeaderHeight
-        rect.size.width += Metrics.rowHeaderWidth
-        rect.size.height += Metrics.colHeaderHeight
+        let vis = visibleRect
+        let cell = cellRect(pos.row, pos.col)
+        var rect = cell
+        // Frozen cells are always on screen along their frozen axis; pad the
+        // other axis by the chrome so cells never land under the panes.
+        if pos.col < frozenColCount {
+            rect.origin.x = vis.minX
+            rect.size.width = 1
+        } else {
+            rect.origin.x -= chromeLeft
+            rect.size.width += chromeLeft
+        }
+        if pos.row < frozenRowCount {
+            rect.origin.y = vis.minY
+            rect.size.height = 1
+        } else {
+            rect.origin.y -= chromeTop
+            rect.size.height += chromeTop
+        }
         scrollToVisible(rect)
     }
 
@@ -578,7 +977,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         selectionDidChange()
         scrollCellToVisible(pos)
 
-        let field = NSTextField(frame: cellRect(pos.row, pos.col).insetBy(dx: 1, dy: 1))
+        // Frozen cells render pinned to the viewport; the editor must match.
+        let vis = visibleRect
+        var frame = cellRect(pos.row, pos.col).insetBy(dx: 1, dy: 1)
+        if pos.col < frozenColCount { frame.origin.x += vis.minX }
+        if pos.row < frozenRowCount { frame.origin.y += vis.minY }
+
+        let field = NSTextField(frame: frame)
         field.font = cellFont(forRow: pos.row)
         field.isBordered = false
         field.focusRingType = .none
@@ -743,6 +1148,18 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     @objc func undo(_ sender: Any?) { undoManager?.undo() }
     @objc func redo(_ sender: Any?) { undoManager?.redo() }
 
+    // MARK: - Freeze toggles (View menu)
+
+    @objc func toggleFreezeFieldRow(_ sender: Any?) {
+        onFormatChange? { $0.freezeFieldRow.toggle() }
+        modelDidChange()
+    }
+
+    @objc func toggleFreezeIDColumn(_ sender: Any?) {
+        onFormatChange? { $0.freezeIDColumn.toggle() }
+        modelDidChange()
+    }
+
     // MARK: - Row / column commands (Sheet menu + context menu)
 
     @objc func insertRowAbove(_ sender: Any?) {
@@ -816,6 +1233,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             return undoManager?.canUndo ?? false
         case #selector(redo(_:)):
             return undoManager?.canRedo ?? false
+        case #selector(toggleFreezeFieldRow(_:)):
+            let format = formatProvider?() ?? TSSFormat()
+            menuItem.state = format.freezeFieldRow ? .on : .off
+            return model?.hasFieldNameRow ?? false
+        case #selector(toggleFreezeIDColumn(_:)):
+            let format = formatProvider?() ?? TSSFormat()
+            menuItem.state = format.freezeIDColumn ? .on : .off
+            return true
         case #selector(deleteSelectedColumns(_:)):
             guard let model else { return false }
             return selectedCols.contains(where: { $0 >= 1 && $0 < model.columnCount })
