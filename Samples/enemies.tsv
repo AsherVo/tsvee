@@ -1,0 +1,12 @@
+ID	Name	HP	Attack	Notes
+# Enemies				
+## Forest				
+slime_green	Green Slime	10	2	Bounces slowly
+slime_red	Red Slime	14	3	Splits on death
+### Boss				
+forest_guardian	Forest Guardian	220	18	Phase 2 at half HP
+## Caves				
+bat_cave	Cave Bat	6	4	Erratic flight
+slime_red	Crimson Slime	20	5	Duplicate ID on purpose
+# Items				
+potion_small	Small Potion			Heals 20
