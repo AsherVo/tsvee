@@ -24,13 +24,14 @@ bundle` app carries).
    blocks your typing — duplicate IDs are tinted red (cell + row number), a
    `⚠ N duplicate IDs` badge appears in the formula bar, and clicking it (or
    Sheet → Jump to Next Duplicate ID, ⇧⌘D) cycles through the offenders.
-2. **`#` IDs are section headers.** `#` is a top-level header, `##` a
-   subheader, `###` (or more) the lowest tier. Header rows get graduated
-   accent tints, bolder/larger type, and taller rows — and are exempt from the
-   uniqueness rule, so two `## Stats` sections under different headers are
-   fine.
+2. **`#` IDs are section headers.** `#` is a top-level header and `##` a
+   subheader — both get accent-tinted rows with bolder/larger type. `###`
+   (or more) renders as a **greyed-out italic comment row**. All are exempt
+   from the uniqueness rule, so two `## Stats` sections under different
+   headers are fine.
 3. If row 1's ID cell is literally `ID`, it's treated as the **field-name
-   row**: styled bold and exempt from uniqueness.
+   row**: bold on a grey band and exempt from uniqueness. IDs in data rows
+   are drawn in monospace.
 4. Empty IDs are allowed (and exempt from uniqueness).
 
 ## Google-Sheets-isms
@@ -86,7 +87,8 @@ Choosing one brings that sheet's window/tab forward and selects the row.
 ## Saving & tabs (Sublime-style)
 
 Traditional save paradigm — no autosave-in-place, no Duplicate/Rename
-titlebar model. Sheets keep a dirty flag and prompt on close/quit.
+titlebar model. Sheets keep a dirty flag (a `*` after the name in the
+window/tab title, plus the close-button dot) and prompt on close/quit.
 
 - **⌘S** Save · **⌥⇧⌘S** Save As… · **⇧⌘S** Save All (every sheet with
   pending changes)

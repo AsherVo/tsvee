@@ -120,6 +120,17 @@ final class DocumentWindowController: NSWindowController {
         refreshFormulaBar()
     }
 
+    // MARK: - Dirty indicator in the window/tab title
+
+    override func windowTitle(forDocumentDisplayName displayName: String) -> String {
+        (document as? NSDocument)?.isDocumentEdited == true ? displayName + "*" : displayName
+    }
+
+    override func setDocumentEdited(_ dirtyFlag: Bool) {
+        super.setDocumentEdited(dirtyFlag)
+        synchronizeWindowTitleWithDocumentName()
+    }
+
     /// Brings this sheet forward and selects the given row (cross-file ID
     /// navigation lands here).
     func reveal(row: Int) {

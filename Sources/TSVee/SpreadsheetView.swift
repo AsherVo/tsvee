@@ -44,10 +44,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         static var selectionFill: NSColor { NSColor.controlAccentColor.withAlphaComponent(0.10) }
         static var selectionBorder: NSColor { .controlAccentColor }
         static var duplicateFill: NSColor { NSColor.systemRed.withAlphaComponent(0.18) }
-        static var fieldRowFill: NSColor { NSColor.windowBackgroundColor.withAlphaComponent(0.8) }
+        /// Field-name row: neutral grey, clearly distinct from the
+        /// accent-tinted section headers.
+        static var fieldRowFill: NSColor { NSColor.systemGray.withAlphaComponent(0.22) }
         static func headerFill(level: Int) -> NSColor {
-            let alphas: [CGFloat] = [0.18, 0.11, 0.06]
-            return NSColor.controlAccentColor.withAlphaComponent(alphas[min(max(level, 1), 3) - 1])
+            switch level {
+            case 1: return NSColor.controlAccentColor.withAlphaComponent(0.32)
+            case 2: return NSColor.controlAccentColor.withAlphaComponent(0.20)
+            default: return NSColor.systemGray.withAlphaComponent(0.08)   // ### = comment
+            }
         }
     }
 
@@ -372,15 +377,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // Text.
         for r in rows {
             guard r < model.rowCount else { break }
-            let font = cellFont(forRow: r)
             // Header and field-name rows ignore column types entirely.
             let plainRow = model.headerLevel(ofRow: r) == 0 && !model.isFieldNameRow(r)
+            let rowColor = textColor(forRow: r)
             for c in cols {
                 guard c < model.columnCount else { break }
                 let text = model.value(row: r, column: c)
                 guard !text.isEmpty else { continue }
                 if editingCell == GridPos(row: r, col: c) { continue }
                 let rect = cellRect(r, c)
+                let font = cellFont(forRow: r, column: c)
                 let type = plainRow ? (cachedTypes[c] ?? .raw) : .raw
 
                 switch type {
@@ -389,14 +395,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     style.lineBreakMode = .byWordWrapping
                     text.draw(in: rect.insetBy(dx: 6, dy: 4), withAttributes: [
                         .font: font,
-                        .foregroundColor: NSColor.labelColor,
+                        .foregroundColor: rowColor,
                         .paragraphStyle: style,
                     ])
                 case .integer, .float:
                     let valid = type == .integer ? Int(text) != nil : Double(text) != nil
                     let attrs: [NSAttributedString.Key: Any] = [
                         .font: font,
-                        .foregroundColor: valid ? NSColor.labelColor : NSColor.systemRed,
+                        .foregroundColor: valid ? rowColor : NSColor.systemRed,
                     ]
                     let size = text.size(withAttributes: attrs)
                     cg.saveGState()
@@ -407,7 +413,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 case .raw:
                     let attrs: [NSAttributedString.Key: Any] = [
                         .font: font,
-                        .foregroundColor: NSColor.labelColor,
+                        .foregroundColor: rowColor,
                     ]
                     let size = text.size(withAttributes: attrs)
                     cg.saveGState()
@@ -451,12 +457,28 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         switch model.headerLevel(ofRow: row) {
         case 1: return .systemFont(ofSize: 14, weight: .bold)
         case 2: return .systemFont(ofSize: 13, weight: .semibold)
-        case 3: return .systemFont(ofSize: 12, weight: .semibold)
+        case 3:
+            // "###" rows read as greyed-out comments: regular weight, italic.
+            return NSFontManager.shared.convert(.systemFont(ofSize: 12), toHaveTrait: .italicFontMask)
         default:
             return model.isFieldNameRow(row)
                 ? .systemFont(ofSize: 12, weight: .semibold)
                 : .systemFont(ofSize: 12)
         }
+    }
+
+    private func cellFont(forRow row: Int, column: Int) -> NSFont {
+        // IDs are identifiers — monospace in plain data rows.
+        if column == 0, let model, row < model.rowCount,
+           model.headerLevel(ofRow: row) == 0, !model.isFieldNameRow(row) {
+            return .monospacedSystemFont(ofSize: 11.5, weight: .regular)
+        }
+        return cellFont(forRow: row)
+    }
+
+    private func textColor(forRow row: Int) -> NSColor {
+        guard let model, row < model.rowCount else { return .labelColor }
+        return model.headerLevel(ofRow: row) == 3 ? .secondaryLabelColor : .labelColor
     }
 
     private func drawChrome(vis: NSRect, model: SpreadsheetModel,
@@ -538,10 +560,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         NSRect(x: vis.minX + headerW - 0.5, y: vis.minY, width: 1, height: vis.height).fill()
         Palette.paneEdge.setFill()
         if frozenRowCount > 0 {
-            NSRect(x: vis.minX, y: vis.minY + chromeTop - 1, width: vis.width, height: 1.5).fill()
+            NSRect(x: vis.minX, y: vis.minY + chromeTop - 2, width: vis.width, height: 3).fill()
         }
         if frozenColCount > 0 {
-            NSRect(x: vis.minX + chromeLeft - 1, y: vis.minY, width: 1.5, height: vis.height).fill()
+            NSRect(x: vis.minX + chromeLeft - 2, y: vis.minY, width: 3, height: vis.height).fill()
         }
     }
 
@@ -1051,7 +1073,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             && model.headerLevel(ofRow: pos.row) == 0 && !model.isFieldNameRow(pos.row)
 
         let field = NSTextField(frame: frame)
-        field.font = cellFont(forRow: pos.row)
+        field.font = cellFont(forRow: pos.row, column: pos.col)
         field.isBordered = false
         field.focusRingType = .none
         field.drawsBackground = true
@@ -1313,7 +1335,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 var maxWidth = Metrics.minColWidth
                 for (r, _) in candidates.prefix(24) {
                     let text = model.value(row: r, column: c)
-                    let w = (text as NSString).size(withAttributes: [.font: cellFont(forRow: r)]).width
+                    let w = (text as NSString).size(withAttributes: [.font: cellFont(forRow: r, column: c)]).width
                     maxWidth = max(maxWidth, w + 14)
                 }
                 format.columnWidths[c] = min(maxWidth.rounded(.up), 800)
