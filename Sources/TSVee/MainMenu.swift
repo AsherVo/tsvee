@@ -44,6 +44,9 @@ enum MainMenu {
     private static func fileMenu() -> NSMenu {
         let menu = NSMenu(title: "File")
         menu.addItem(withTitle: "New", action: #selector(NSDocumentController.newDocument(_:)), keyEquivalent: "n")
+        let newWindow = menu.addItem(withTitle: "New Window",
+                                     action: NSSelectorFromString("newUntitledWindow:"), keyEquivalent: "n")
+        newWindow.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(withTitle: "Open…", action: #selector(NSDocumentController.openDocument(_:)), keyEquivalent: "o")
 
         let openRecent = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
@@ -54,10 +57,13 @@ enum MainMenu {
 
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-        menu.addItem(withTitle: "Save…", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
+        menu.addItem(withTitle: "Save", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
         let saveAs = menu.addItem(withTitle: "Save As…",
-                                  action: #selector(NSDocument.saveAs(_:)), keyEquivalent: "S")
-        saveAs.keyEquivalentModifierMask = [.command, .shift]
+                                  action: #selector(NSDocument.saveAs(_:)), keyEquivalent: "s")
+        saveAs.keyEquivalentModifierMask = [.command, .option, .shift]
+        let saveAll = menu.addItem(withTitle: "Save All",
+                                   action: NSSelectorFromString("saveAllDocuments:"), keyEquivalent: "s")
+        saveAll.keyEquivalentModifierMask = [.command, .shift]
         menu.addItem(withTitle: "Revert to Saved",
                      action: #selector(NSDocument.revertToSaved(_:)), keyEquivalent: "")
         return menu
@@ -83,6 +89,11 @@ enum MainMenu {
                      action: NSSelectorFromString("toggleFreezeFieldRow:"), keyEquivalent: "")
         menu.addItem(withTitle: "Freeze ID Column",
                      action: NSSelectorFromString("toggleFreezeIDColumn:"), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Show Tab Bar",
+                     action: #selector(NSWindow.toggleTabBar(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Show All Tabs",
+                     action: #selector(NSWindow.toggleTabOverview(_:)), keyEquivalent: "")
         return menu
     }
 
@@ -112,6 +123,17 @@ enum MainMenu {
         let menu = NSMenu(title: "Window")
         menu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         menu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        menu.addItem(.separator())
+        let previousTab = menu.addItem(withTitle: "Show Previous Tab",
+                                       action: #selector(NSWindow.selectPreviousTab(_:)), keyEquivalent: "[")
+        previousTab.keyEquivalentModifierMask = [.command, .shift]
+        let nextTab = menu.addItem(withTitle: "Show Next Tab",
+                                   action: #selector(NSWindow.selectNextTab(_:)), keyEquivalent: "]")
+        nextTab.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(withTitle: "Move Tab to New Window",
+                     action: #selector(NSWindow.moveTabToNewWindow(_:)), keyEquivalent: "")
+        menu.addItem(withTitle: "Merge All Windows",
+                     action: #selector(NSWindow.mergeAllWindows(_:)), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Bring All to Front",
                      action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")

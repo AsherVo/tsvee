@@ -15,6 +15,11 @@ final class DocumentWindowController: NSWindowController {
         window.center()
         window.setFrameAutosaveName("TSVeeDocumentWindow")
 
+        // Sublime-style tabs: documents open as tabs of the frontmost window;
+        // dragging a tab out creates an independent window with its own tabs.
+        window.tabbingMode = .preferred
+        window.tabbingIdentifier = "TSVeeDocumentWindow"
+
         self.init(window: window)
 
         // Format hooks must be in place before the model is attached — the

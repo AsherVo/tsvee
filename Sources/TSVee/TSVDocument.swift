@@ -11,7 +11,9 @@ final class TSVDocument: NSDocument {
         model.undoManager = undoManager
     }
 
-    override class var autosavesInPlace: Bool { true }
+    // Traditional save paradigm: dirty flag, explicit ⌘S, prompt on close —
+    // no autosave-in-place and none of the Duplicate/Rename titlebar model.
+    override class var autosavesInPlace: Bool { false }
 
     override func makeWindowControllers() {
         addWindowController(DocumentWindowController(document: self))

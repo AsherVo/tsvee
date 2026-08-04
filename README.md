@@ -59,8 +59,20 @@ bundle` app carries).
   grows the file (trailing empty rows/columns are trimmed on save).
 - Right-click for insert/delete row & column operations (also in the Sheet
   menu). The ID column can't be deleted or displaced.
-- Full undo/redo, autosave-in-place, and Versions via the standard document
-  system.
+- Full undo/redo.
+
+## Saving & tabs (Sublime-style)
+
+Traditional save paradigm — no autosave-in-place, no Duplicate/Rename
+titlebar model. Sheets keep a dirty flag and prompt on close/quit.
+
+- **⌘S** Save · **⌥⇧⌘S** Save As… · **⇧⌘S** Save All (every sheet with
+  pending changes)
+- Sheets open as **tabs** of the frontmost window (**⇧⌘[** / **⇧⌘]** to
+  switch). Drag a tab out — or use Window → Move Tab to New Window — to get
+  an independent window with its own tab group; **⇧⌘N** opens a fresh
+  standalone window. Window → Merge All Windows collects everything back
+  into one.
 
 ## `.tss` — Tab Separated Support (stubbed)
 
