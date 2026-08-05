@@ -1,5 +1,13 @@
 import Foundation
 
+/// How a find (or replace) query matches cell content.
+struct FindOptions: Equatable {
+    var caseSensitive = false
+    /// Match only cells whose entire content equals the query, instead of
+    /// any cell containing it.
+    var wholeCell = false
+}
+
 /// The raw TSV data: a rectangular grid of strings.
 ///
 /// Rules enforced/understood by the model:
@@ -389,6 +397,70 @@ final class SpreadsheetModel {
     static func shiftedIndex(_ index: Int, afterRemoving removed: IndexSet) -> Int? {
         guard !removed.contains(index) else { return nil }
         return index - removed.count(in: 0..<index)
+    }
+
+    // MARK: - Find & replace
+
+    static func value(_ value: String, matches query: String, options: FindOptions) -> Bool {
+        guard !query.isEmpty else { return false }
+        let compareOptions: String.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
+        if options.wholeCell {
+            return value.compare(query, options: compareOptions) == .orderedSame
+        }
+        return value.range(of: query, options: compareOptions) != nil
+    }
+
+    /// The cell's content with every match replaced — nil when it doesn't
+    /// match at all, so callers can tell "replaced" from "left alone".
+    static func replacing(_ value: String, query: String, with replacement: String,
+                          options: FindOptions) -> String? {
+        guard Self.value(value, matches: query, options: options) else { return nil }
+        if options.wholeCell { return replacement }
+        let compareOptions: String.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
+        return value.replacingOccurrences(of: query, with: replacement, options: compareOptions)
+    }
+
+    /// Every matching cell, in reading order (row-major).
+    func findMatches(_ query: String, options: FindOptions) -> [(row: Int, column: Int)] {
+        guard !query.isEmpty else { return [] }
+        var matches: [(row: Int, column: Int)] = []
+        for r in rows.indices {
+            for c in 0..<columnCount where Self.value(rows[r][c], matches: query, options: options) {
+                matches.append((r, c))
+            }
+        }
+        return matches
+    }
+
+    /// Replaces every match in the sheet as a single undo step. Returns the
+    /// number of cells that changed.
+    @discardableResult
+    func replaceAll(_ query: String, with replacement: String, options: FindOptions) -> Int {
+        var changes: [(row: Int, column: Int, value: String)] = []
+        for r in rows.indices {
+            for c in 0..<columnCount {
+                if let updated = Self.replacing(rows[r][c], query: query, with: replacement,
+                                                options: options),
+                   updated != rows[r][c] {
+                    changes.append((r, c, updated))
+                }
+            }
+        }
+        guard !changes.isEmpty else { return 0 }
+        setCells(changes)
+        undoManager?.setActionName("Replace All")
+        return changes.count
+    }
+
+    /// Batch cell write: one undo step no matter how many cells change.
+    private func setCells(_ changes: [(row: Int, column: Int, value: String)]) {
+        let old = changes.map { (row: $0.row, column: $0.column, value: rows[$0.row][$0.column]) }
+        for change in changes { rows[change.row][change.column] = change.value }
+        undoManager?.registerUndo(withTarget: self) { model in
+            model.setCells(old)
+        }
+        recomputeDuplicates()
+        onChange?()
     }
 
     // MARK: - Unique-ID enforcement

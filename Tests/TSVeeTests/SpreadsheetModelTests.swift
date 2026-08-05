@@ -437,3 +437,88 @@ final class SelectOptionsResolverTests: XCTestCase {
         XCTAssertEqual(resolver.options(for: .list(["a", "b"]), tsvURL: nil), ["a", "b"])
     }
 }
+
+final class FindReplaceTests: XCTestCase {
+
+    private func makeModel(_ tsv: String) -> SpreadsheetModel {
+        let model = SpreadsheetModel()
+        model.load(tsv: tsv)
+        return model
+    }
+
+    func testMatchingRules() {
+        let options = FindOptions()
+        XCTAssertTrue(SpreadsheetModel.value("Red Slime", matches: "slime", options: options))
+        XCTAssertFalse(SpreadsheetModel.value("Red Slime", matches: "slime",
+                                              options: FindOptions(caseSensitive: true)))
+        XCTAssertTrue(SpreadsheetModel.value("Slime", matches: "SLIME",
+                                             options: FindOptions(wholeCell: true)))
+        XCTAssertFalse(SpreadsheetModel.value("Red Slime", matches: "Slime",
+                                              options: FindOptions(wholeCell: true)))
+        // The empty query matches nothing (not everything).
+        XCTAssertFalse(SpreadsheetModel.value("anything", matches: "", options: options))
+    }
+
+    func testFindMatchesInReadingOrder() {
+        let model = makeModel("ID\tName\nslime_red\tRed Slime\nbat\tBat\nslime_blue\tBlue Slime")
+        let matches = model.findMatches("slime", options: FindOptions())
+        XCTAssertEqual(matches.map { [$0.row, $0.column] }, [[1, 0], [1, 1], [3, 0], [3, 1]])
+
+        let caseSensitive = model.findMatches("Slime", options: FindOptions(caseSensitive: true))
+        XCTAssertEqual(caseSensitive.map { [$0.row, $0.column] }, [[1, 1], [3, 1]])
+
+        XCTAssertTrue(model.findMatches("", options: FindOptions()).isEmpty)
+    }
+
+    func testReplacingHelper() {
+        XCTAssertEqual(SpreadsheetModel.replacing("Red Slime", query: "slime", with: "Goblin",
+                                                  options: FindOptions()), "Red Goblin")
+        XCTAssertNil(SpreadsheetModel.replacing("Red Slime", query: "goblin", with: "x",
+                                                options: FindOptions()))
+        // Whole-cell replaces the entire content, whatever the query's case.
+        XCTAssertEqual(SpreadsheetModel.replacing("SLIME", query: "slime", with: "goblin",
+                                                  options: FindOptions(wholeCell: true)), "goblin")
+        XCTAssertNil(SpreadsheetModel.replacing("Red Slime", query: "Slime", with: "goblin",
+                                                options: FindOptions(wholeCell: true)))
+    }
+
+    func testReplaceAllIsOneUndoStep() {
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        let model = makeModel("ID\tName\nslime_red\tRed Slime\nslime_blue\tBlue Slime")
+        model.undoManager = undo
+
+        undo.beginUndoGrouping()
+        let count = model.replaceAll("slime", with: "goblin", options: FindOptions())
+        undo.endUndoGrouping()
+
+        XCTAssertEqual(count, 4)
+        XCTAssertEqual(model.value(row: 1, column: 0), "goblin_red")
+        XCTAssertEqual(model.value(row: 1, column: 1), "Red goblin")
+        XCTAssertEqual(model.value(row: 2, column: 0), "goblin_blue")
+
+        undo.undo()
+        XCTAssertEqual(model.value(row: 1, column: 0), "slime_red")
+        XCTAssertEqual(model.value(row: 1, column: 1), "Red Slime")
+        undo.redo()
+        XCTAssertEqual(model.value(row: 1, column: 0), "goblin_red")
+    }
+
+    func testReplaceAllReplacesEveryOccurrenceInACell() {
+        let model = makeModel("a\tslime slime slime")
+        XCTAssertEqual(model.replaceAll("slime", with: "bat", options: FindOptions()), 1)
+        XCTAssertEqual(model.value(row: 0, column: 1), "bat bat bat")
+    }
+
+    func testReplaceAllUpdatesDuplicateTracking() {
+        let model = makeModel("slime\ta\nslime2\tb")
+        model.replaceAll("slime2", with: "slime", options: FindOptions())
+        XCTAssertEqual(model.duplicateIDRows, [0, 1])
+    }
+
+    func testReplaceAllWithNoMatchesChangesNothing() {
+        let model = makeModel("a\tb")
+        XCTAssertEqual(model.replaceAll("zzz", with: "x", options: FindOptions()), 0)
+        XCTAssertEqual(model.value(row: 0, column: 0), "a")
+    }
+}

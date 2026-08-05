@@ -2218,6 +2218,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         (document.windowControllers.first as? DocumentWindowController)?.reveal(row: target.row)
     }
 
+    /// The focused cell — where a find starts searching from.
+    var focusedCell: GridPos { focus }
+
+    /// Selects a single cell and scrolls it into view (find & replace lands
+    /// matches here).
+    func selectCellAndReveal(row: Int, column: Int) {
+        guard row < gridRows else { return }
+        expandToReveal(row: row)
+        let pos = GridPos(row: row, col: min(column, gridCols - 1))
+        anchor = pos
+        focus = pos
+        scrollCellToVisible(pos)
+        selectionDidChange()
+    }
+
     /// Selects a row (full width), scrolls it into view. Used when arriving
     /// from another sheet.
     func selectRowAndReveal(_ row: Int) {

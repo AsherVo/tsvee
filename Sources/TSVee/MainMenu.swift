@@ -80,6 +80,18 @@ enum MainMenu {
         menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         menu.addItem(withTitle: "Delete", action: NSSelectorFromString("delete:"), keyEquivalent: "")
         menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Find and Replace…",
+                     action: NSSelectorFromString("showFindBar:"), keyEquivalent: "f")
+        let findAll = menu.addItem(withTitle: "Find and Replace in All Sheets…",
+                                   action: NSSelectorFromString("showFindBarAllSheets:"),
+                                   keyEquivalent: "F")
+        findAll.keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(withTitle: "Find Next",
+                     action: NSSelectorFromString("findNext:"), keyEquivalent: "g")
+        let findPrevious = menu.addItem(withTitle: "Find Previous",
+                                        action: NSSelectorFromString("findPrevious:"), keyEquivalent: "G")
+        findPrevious.keyEquivalentModifierMask = [.command, .shift]
         return menu
     }
 

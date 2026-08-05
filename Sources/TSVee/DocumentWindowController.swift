@@ -4,6 +4,8 @@ final class DocumentWindowController: NSWindowController {
 
     private let spreadsheetView = SpreadsheetView()
     private let formulaBar = FormulaBarView()
+    private let findBar = FindBarView()
+    private var findBarHeightConstraint: NSLayoutConstraint?
 
     convenience init(document: TSVDocument) {
         let window = NSWindow(
@@ -49,10 +51,16 @@ final class DocumentWindowController: NSWindowController {
         divider.boxType = .separator
         divider.translatesAutoresizingMaskIntoConstraints = false
 
+        findBar.translatesAutoresizingMaskIntoConstraints = false
+        findBar.isHidden = true
+        let findBarHeight = findBar.heightAnchor.constraint(equalToConstant: 0)
+        findBarHeightConstraint = findBarHeight
+
         let content = NSView()
         content.addSubview(formulaBar)
         content.addSubview(divider)
         content.addSubview(scrollView)
+        content.addSubview(findBar)
         window.contentView = content
 
         NSLayoutConstraint.activate([
@@ -68,7 +76,12 @@ final class DocumentWindowController: NSWindowController {
             scrollView.topAnchor.constraint(equalTo: divider.bottomAnchor),
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: findBar.topAnchor),
+
+            findBar.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            findBar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            findBar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            findBarHeight,
         ])
 
         wireUp(document: document)
@@ -103,6 +116,7 @@ final class DocumentWindowController: NSWindowController {
             guard let self else { return }
             self.spreadsheetView.modelDidChange()
             self.refreshFormulaBar()
+            self.findBar.noteModelChanged()
         }
 
         spreadsheetView.onSelectionChange = { [weak self] in
@@ -116,9 +130,57 @@ final class DocumentWindowController: NSWindowController {
             self?.spreadsheetView.jumpToNextDuplicateID(nil)
         }
 
+        findBar.ownDocument = { [weak document] in document }
+        findBar.ownFocusedCell = { [weak self] in
+            self?.spreadsheetView.focusedCell ?? GridPos(row: 0, col: 0)
+        }
+        findBar.onDismiss = { [weak self] in self?.hideFindBar() }
+
         // The document was read before this controller existed, so push the
         // initial state through by hand.
         refreshFormulaBar()
+    }
+
+    // MARK: - Find & replace (menu actions arrive via the responder chain)
+
+    /// ⌘F: find in this sheet. ⇧⌘F: find across all open sheets. Either way
+    /// the scope stays visible (and changeable) in the bar's popup.
+    @objc func showFindBar(_ sender: Any?) {
+        FindState.shared.allSheets = false
+        showFindBar(takeFocus: true)
+    }
+
+    @objc func showFindBarAllSheets(_ sender: Any?) {
+        FindState.shared.allSheets = true
+        showFindBar(takeFocus: true)
+    }
+
+    func showFindBar(takeFocus: Bool) {
+        findBar.refreshFromState()
+        findBar.isHidden = false
+        findBarHeightConstraint?.constant = FindBarView.barHeight
+        if takeFocus { findBar.focusSearchField() }
+    }
+
+    func hideFindBar() {
+        findBar.isHidden = true
+        findBarHeightConstraint?.constant = 0
+        window?.makeFirstResponder(spreadsheetView)
+    }
+
+    @objc func findNext(_ sender: Any?) { findBar.performFind(backwards: false) }
+    @objc func findPrevious(_ sender: Any?) { findBar.performFind(backwards: true) }
+
+    /// Brings this sheet forward and selects a matching cell. When a search
+    /// hops here from another sheet, this bar comes up showing the same
+    /// search, and focus lands in the same field it left — so Return (or
+    /// typing a new query) carries straight on.
+    func revealFindMatch(row: Int, column: Int, focusing field: FindBarView.Field?) {
+        window?.makeKeyAndOrderFront(nil)
+        spreadsheetView.selectCellAndReveal(row: row, column: column)
+        guard !FindState.shared.query.isEmpty else { return }
+        if findBar.isHidden { showFindBar(takeFocus: false) }
+        if let field { findBar.focus(field) }
     }
 
     // MARK: - Dirty indicator in the window/tab title

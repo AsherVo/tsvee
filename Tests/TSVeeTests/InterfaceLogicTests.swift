@@ -240,3 +240,30 @@ final class TSSFreezeTests: XCTestCase {
         XCTAssertTrue(parsed.freezeIDColumn)
     }
 }
+
+final class FolderOpenTests: XCTestCase {
+
+    func testTSVFilesListsOnlyTopLevelTSVsInFinderOrder() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsvee-folder-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        for name in ["b.tsv", "a10.tsv", "a2.tsv", "Z.TSV", "notes.txt", "data.tss"] {
+            try Data().write(to: dir.appendingPathComponent(name))
+        }
+        let nested = dir.appendingPathComponent("nested")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try Data().write(to: nested.appendingPathComponent("inner.tsv"))
+
+        let names = TSVDocumentController.tsvFiles(inFolder: dir).map(\.lastPathComponent)
+        // Finder-style ordering: numeric-aware, case-insensitive; extension
+        // matching is case-insensitive; subfolders and other types skipped.
+        XCTAssertEqual(names, ["a2.tsv", "a10.tsv", "b.tsv", "Z.TSV"])
+    }
+
+    func testTSVFilesOnMissingFolderIsEmpty() {
+        let missing = URL(fileURLWithPath: "/tmp/tsvee-does-not-exist-\(UUID().uuidString)")
+        XCTAssertTrue(TSVDocumentController.tsvFiles(inFolder: missing).isEmpty)
+    }
+}
