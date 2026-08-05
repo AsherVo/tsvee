@@ -185,13 +185,32 @@ final class DocumentWindowController: NSWindowController {
 
     // MARK: - Dirty indicator in the window/tab title
 
+    /// Compact title for a tab: the dirty marker goes up front (narrow tabs
+    /// truncate the tail, so a trailing marker is the first thing to vanish)
+    /// and the ".tsv" every tab shares is dropped — it's pure noise at tab
+    /// width. The full name lives in the tab's tooltip.
+    static func tabTitle(for displayName: String, edited: Bool) -> String {
+        let name = (displayName as NSString).pathExtension.lowercased() == "tsv"
+            ? (displayName as NSString).deletingPathExtension
+            : displayName
+        return (edited ? "*" : "") + name
+    }
+
     override func windowTitle(forDocumentDisplayName displayName: String) -> String {
-        (document as? NSDocument)?.isDocumentEdited == true ? displayName + "*" : displayName
+        (document as? NSDocument)?.isDocumentEdited == true ? "*" + displayName : displayName
     }
 
     override func setDocumentEdited(_ dirtyFlag: Bool) {
         super.setDocumentEdited(dirtyFlag)
         synchronizeWindowTitleWithDocumentName()
+    }
+
+    override func synchronizeWindowTitleWithDocumentName() {
+        super.synchronizeWindowTitleWithDocumentName()
+        guard let window, let document = document as? NSDocument else { return }
+        window.tab.title = Self.tabTitle(for: document.displayName,
+                                         edited: document.isDocumentEdited)
+        window.tab.toolTip = document.displayName
     }
 
     /// Brings this sheet forward and selects the given row (cross-file ID

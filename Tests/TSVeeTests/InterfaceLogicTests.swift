@@ -267,3 +267,25 @@ final class FolderOpenTests: XCTestCase {
         XCTAssertTrue(TSVDocumentController.tsvFiles(inFolder: missing).isEmpty)
     }
 }
+
+final class TabTitleTests: XCTestCase {
+
+    func testDirtyMarkerLeadsAndExtensionDrops() {
+        XCTAssertEqual(DocumentWindowController.tabTitle(for: "enemies.tsv", edited: false),
+                       "enemies")
+        XCTAssertEqual(DocumentWindowController.tabTitle(for: "enemies.tsv", edited: true),
+                       "*enemies")
+        XCTAssertEqual(DocumentWindowController.tabTitle(for: "ENEMIES.TSV", edited: false),
+                       "ENEMIES")
+    }
+
+    func testOnlyTheTSVExtensionIsDropped() {
+        // Untitled sheets and odd names keep their full display name.
+        XCTAssertEqual(DocumentWindowController.tabTitle(for: "Untitled", edited: true),
+                       "*Untitled")
+        XCTAssertEqual(DocumentWindowController.tabTitle(for: "notes.txt", edited: false),
+                       "notes.txt")
+        XCTAssertEqual(DocumentWindowController.tabTitle(for: "v1.2.tsv", edited: false),
+                       "v1.2")
+    }
+}
