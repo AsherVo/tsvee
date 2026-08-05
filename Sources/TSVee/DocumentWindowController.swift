@@ -143,6 +143,7 @@ final class DocumentWindowController: NSWindowController {
         formulaBar.update(
             cellName: spreadsheetView.focusedCellName(),
             content: spreadsheetView.focusedCellValue(),
-            duplicateCount: model.duplicateIDRows.count)
+            duplicateCount: model.duplicateIDRows.count,
+            tally: spreadsheetView.selectionTally())
     }
 }

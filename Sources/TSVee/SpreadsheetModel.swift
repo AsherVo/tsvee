@@ -74,6 +74,32 @@ final class SpreadsheetModel {
         return rows[row][column]
     }
 
+    /// Populated / empty tally over a rectangle of cells, for the selection
+    /// readout in the formula bar.
+    ///
+    /// Only real entries count: a row has to have an ID to be one, so `#`
+    /// header and comment rows, the field-name row (selecting a whole column
+    /// shouldn't count the column name), ID-less rows, and everything past the
+    /// end of the data are all skipped. A column in `booleanColumns` holds
+    /// checkboxes, where only a checked box counts as populated — FALSE is an
+    /// answer, but it isn't content.
+    func tally(rows rowRange: ClosedRange<Int>, columns columnRange: ClosedRange<Int>,
+               booleanColumns: Set<Int>) -> (populated: Int, empty: Int) {
+        var populated = 0, empty = 0
+        for row in rowRange where row < rowCount {
+            guard headerLevel(ofRow: row) == 0, !isFieldNameRow(row),
+                  !rows[row][0].isEmpty else { continue }
+            for column in columnRange where column < columnCount {
+                let value = rows[row][column]
+                let counts = booleanColumns.contains(column)
+                    ? BooleanCell(value) == .on
+                    : !value.isEmpty
+                if counts { populated += 1 } else { empty += 1 }
+            }
+        }
+        return (populated, empty)
+    }
+
     /// Header level of a row: 0 = plain data, 1–3 = "#"/"##"/"###" headers.
     func headerLevel(ofRow row: Int) -> Int {
         guard row < rows.count else { return 0 }

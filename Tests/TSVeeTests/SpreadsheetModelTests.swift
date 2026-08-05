@@ -213,6 +213,45 @@ final class SpreadsheetModelTests: XCTestCase {
         XCTAssertEqual(model.value(row: 0, column: 0), "ID")
         XCTAssertEqual(model.value(row: 0, column: 1), "")
     }
+
+    // MARK: - Selection tally
+
+    /// Row 0 is the field-name row, row 2 a header, row 5 a "###" comment and
+    /// row 6 has no ID — none of them are entries, so none are counted.
+    private func tallyModel() -> SpreadsheetModel {
+        makeModel("""
+        ID\tName\tFlag
+        a\tAlpha\tTRUE
+        # Section\t\t
+        b\t\tFALSE
+        c\tGamma\t
+        ### note\tignored\tTRUE
+        \tstray\tTRUE
+        """)
+    }
+
+    func testTallySkipsHeaderCommentFieldNameAndIDLessRows() {
+        let model = tallyModel()
+        let tally = model.tally(rows: 0...6, columns: 0...1, booleanColumns: [])
+        // Three data rows × two columns; only b's empty Name is unpopulated.
+        XCTAssertEqual(tally.populated, 5)
+        XCTAssertEqual(tally.empty, 1)
+    }
+
+    func testTallyCountsOnlyCheckedBooleans() {
+        let model = tallyModel()
+        // FALSE and empty are both "not populated" in a boolean column.
+        XCTAssertEqual(model.tally(rows: 0...6, columns: 2...2, booleanColumns: [2]).populated, 1)
+        XCTAssertEqual(model.tally(rows: 0...6, columns: 2...2, booleanColumns: [2]).empty, 2)
+        // Without the column type it's just text, so FALSE counts as content.
+        XCTAssertEqual(model.tally(rows: 0...6, columns: 2...2, booleanColumns: []).populated, 2)
+    }
+
+    func testTallyIgnoresRowsAndColumnsPastTheData() {
+        let model = tallyModel()
+        let tally = model.tally(rows: 0...400, columns: 0...30, booleanColumns: [])
+        XCTAssertEqual(tally.populated + tally.empty, 9)   // 3 data rows × 3 columns
+    }
 }
 
 final class TSSFormatTests: XCTestCase {

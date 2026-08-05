@@ -5,6 +5,16 @@ struct GridPos: Equatable {
     var col: Int
 }
 
+/// The formula bar's readout for a multi-cell selection.
+struct SelectionTally {
+    let populated: Int
+    let total: Int
+    /// True when the selection is the ID column and nothing else. Every counted
+    /// row has an ID by definition, so a filled/total split there would always
+    /// read `12/12` — it's a count of entries, and says so.
+    let idsOnly: Bool
+}
+
 /// The grid itself. A single custom-drawn view (only visible cells are ever
 /// drawn) inside an NSScrollView, with Google-Sheets-style chrome: column
 /// letters, row numbers, accent-colored range selection, frozen panes for the
@@ -94,6 +104,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var cachedHeights: [Int: CGFloat] = [:]
     private var cachedTypes: [Int: ColumnType] = [:]
     private var textColumnIndices: [Int] = []
+    private var booleanColumnIndices: Set<Int> = []
     /// Wrapped-text height memo, keyed by "width|text" (value-based, so it
     /// survives model changes).
     private var wrapHeightCache: [String: CGFloat] = [:]
@@ -238,6 +249,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         cachedHeights = format.rowHeights
         cachedTypes = format.columnTypes
         textColumnIndices = format.columnTypes.filter { $0.value == .text }.keys.sorted()
+        booleanColumnIndices = Set(format.columnTypes.filter { $0.value == .boolean }.keys)
         frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
         frozenColCount = format.freezeIDColumn ? 1 : 0
         gridRows = model.rowCount + Metrics.phantomRows
@@ -1361,6 +1373,39 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             rect.size.height += chromeTop
         }
         scrollToVisible(rect)
+    }
+
+    /// The rows the tally covers: the selection, reaching down over anything
+    /// folded under a collapsed header inside it. A folded section's rows are
+    /// part of what you selected — you just can't see them — and selecting a
+    /// collapsed header is the only way to select them at all. A section body
+    /// always sits directly below its header, so the reach stays contiguous.
+    private func talliedRows() -> ClosedRange<Int> {
+        var last = selectedRows.upperBound
+        if let model {
+            for header in collapsedRows where selectedRows.contains(header) {
+                if let body = model.sectionBody(ofRow: header) {
+                    last = max(last, body.upperBound)
+                }
+            }
+        }
+        return selectedRows.lowerBound...last
+    }
+
+    /// Populated / empty tally for a multi-cell selection, for the formula bar.
+    /// nil for a lone cell (whose content is already right there in the bar)
+    /// and for a selection with nothing countable in it. A collapsed header is
+    /// never a lone cell: it stands in for everything folded under it.
+    func selectionTally() -> SelectionTally? {
+        guard let model else { return nil }
+        let rows = talliedRows()
+        guard rows.count * selectedCols.count > 1 else { return nil }
+        let tally = model.tally(rows: rows, columns: selectedCols,
+                                booleanColumns: booleanColumnIndices)
+        let total = tally.populated + tally.empty
+        guard total > 0 else { return nil }
+        return SelectionTally(populated: tally.populated, total: total,
+                              idsOnly: selectedCols == 0...0)
     }
 
     private func selectionDidChange() {

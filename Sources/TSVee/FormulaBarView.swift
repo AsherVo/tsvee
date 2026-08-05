@@ -1,8 +1,9 @@
 import AppKit
 
 /// Google-Sheets-style bar above the grid: a name box showing the focused
-/// cell's address, an editable field mirroring its raw content, and a
-/// duplicate-ID warning that jumps to the offending rows.
+/// cell's address, an editable field mirroring its raw content, and — at the
+/// right — a tally of the current selection plus a duplicate-ID warning that
+/// jumps to the offending rows.
 final class FormulaBarView: NSView, NSTextFieldDelegate {
 
     var onCommit: ((String) -> Void)?
@@ -11,6 +12,7 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
     private let nameBox = NSTextField(labelWithString: "")
     private let contentField = NSTextField(string: "")
     private let duplicateButton = NSButton(title: "", target: nil, action: nil)
+    private let tallyLabel = NSTextField(labelWithString: "")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -44,10 +46,22 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
         duplicateButton.action = #selector(jumpToDuplicate)
         duplicateButton.isHidden = true
 
+        tallyLabel.translatesAutoresizingMaskIntoConstraints = false
+        tallyLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        tallyLabel.textColor = .secondaryLabelColor
+        tallyLabel.isHidden = true
+
+        // A stack so the warning slides over to the edge whenever there's no
+        // tally to show (hidden arranged views drop out of the layout).
+        let status = NSStackView(views: [duplicateButton, tallyLabel])
+        status.translatesAutoresizingMaskIntoConstraints = false
+        status.orientation = .horizontal
+        status.spacing = 12
+
         addSubview(nameBox)
         addSubview(nameBoxDivider)
         addSubview(contentField)
-        addSubview(duplicateButton)
+        addSubview(status)
 
         NSLayoutConstraint.activate([
             nameBox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
@@ -60,20 +74,29 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
 
             contentField.leadingAnchor.constraint(equalTo: nameBoxDivider.trailingAnchor, constant: 10),
             contentField.centerYAnchor.constraint(equalTo: centerYAnchor),
-            contentField.trailingAnchor.constraint(lessThanOrEqualTo: duplicateButton.leadingAnchor, constant: -10),
+            contentField.trailingAnchor.constraint(lessThanOrEqualTo: status.leadingAnchor, constant: -10),
             contentField.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
 
-            duplicateButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
-            duplicateButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            status.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            status.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(cellName: String, content: String, duplicateCount: Int) {
+    func update(cellName: String, content: String, duplicateCount: Int,
+                tally: SelectionTally?) {
         nameBox.stringValue = cellName
         if contentField.currentEditor() == nil {
             contentField.stringValue = content
+        }
+        if let tally {
+            tallyLabel.stringValue = tally.idsOnly
+                ? "\(tally.populated) entr\(tally.populated == 1 ? "y" : "ies")"
+                : "Count: \(tally.populated)/\(tally.total)"
+            tallyLabel.isHidden = false
+        } else {
+            tallyLabel.isHidden = true
         }
         if duplicateCount > 0 {
             duplicateButton.title = "⚠︎ \(duplicateCount) duplicate ID\(duplicateCount == 1 ? "" : "s")"

@@ -39,6 +39,15 @@ bundle` app carries).
 
 - Column letters / row numbers, accent-colored range selection, a formula bar
   with an `A1` name box that edits the raw cell value.
+- **Selection tally**: select more than one cell and the right of the formula
+  bar reads `Count: 12/16` — populated cells out of cells counted. Select the
+  ID column and it reads `12 entries` instead, since every counted row has an
+  ID. Only entries are counted: a row needs an ID to be one, so `#` header and
+  comment rows, the field-name row (selecting a column doesn't count its
+  name), rows with no ID, and everything past the end of the data are all
+  skipped. In a Boolean column only checked boxes count as populated.
+  Selecting a collapsed header counts everything folded under it, so you can
+  tally a section without unfolding it.
 - **Frozen panes**: the field-name row and the ID column stay pinned while you
   scroll (both on by default; toggle in the View menu, persisted via `.tss`).
 - **Fill handle**: drag the circle at the selection's bottom-right corner to
