@@ -150,20 +150,20 @@ final class SpreadsheetModelTests: XCTestCase {
     // MARK: - Per-row state follows its content
 
     func testShiftedRowIndexAfterInsert() {
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(2, afterInsertAt: 3), 2)
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(3, afterInsertAt: 3), 4)
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(5, afterInsertAt: 3), 6)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(2, afterInsertAt: 3), 2)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(3, afterInsertAt: 3), 4)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(5, afterInsertAt: 3), 6)
     }
 
     func testShiftedRowIndexAfterRemoval() {
         let removed = IndexSet([1, 3])
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(0, afterRemoving: removed), 0)
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(2, afterRemoving: removed), 1)
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(4, afterRemoving: removed), 2)
-        XCTAssertEqual(SpreadsheetModel.shiftedRowIndex(5, afterRemoving: removed), 3)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(0, afterRemoving: removed), 0)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(2, afterRemoving: removed), 1)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(4, afterRemoving: removed), 2)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(5, afterRemoving: removed), 3)
         // State on a deleted row is dropped, not relocated.
-        XCTAssertNil(SpreadsheetModel.shiftedRowIndex(1, afterRemoving: removed))
-        XCTAssertNil(SpreadsheetModel.shiftedRowIndex(3, afterRemoving: removed))
+        XCTAssertNil(SpreadsheetModel.shiftedIndex(1, afterRemoving: removed))
+        XCTAssertNil(SpreadsheetModel.shiftedIndex(3, afterRemoving: removed))
     }
 
     // MARK: - Undo
@@ -201,6 +201,47 @@ final class SpreadsheetModelTests: XCTestCase {
         XCTAssertEqual(model.rowCount, 4)
         XCTAssertEqual(model.value(row: 1, column: 0), "a")
         XCTAssertEqual(model.value(row: 3, column: 0), "c")
+    }
+
+    func testInsertingSeveralRowsIsOneUndoStep() {
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        let model = makeModel("ID\na\nb")
+        model.undoManager = undo
+
+        undo.beginUndoGrouping()
+        model.insertRow(at: 1, count: 3)
+        undo.endUndoGrouping()
+        XCTAssertEqual(model.rowCount, 6)
+        XCTAssertEqual(model.value(row: 1, column: 0), "")
+        XCTAssertEqual(model.value(row: 4, column: 0), "a")
+
+        undo.undo()
+        XCTAssertEqual(model.rowCount, 3)
+        XCTAssertEqual(model.value(row: 1, column: 0), "a")
+    }
+
+    func testInsertingSeveralColumnsIsOneUndoStep() {
+        let undo = UndoManager()
+        undo.groupsByEvent = false
+        let model = makeModel("ID\tName\na\tAlpha")
+        model.undoManager = undo
+
+        undo.beginUndoGrouping()
+        model.insertColumn(at: 1, count: 2)
+        undo.endUndoGrouping()
+        XCTAssertEqual(model.columnCount, 4)
+        XCTAssertEqual(model.value(row: 1, column: 0), "a")
+        XCTAssertEqual(model.value(row: 1, column: 3), "Alpha")
+
+        undo.undo()
+        XCTAssertEqual(model.columnCount, 2)
+        XCTAssertEqual(model.value(row: 1, column: 1), "Alpha")
+    }
+
+    func testRowFormattingShiftsByTheNumberInserted() {
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(5, afterInsertAt: 2, count: 3), 8)
+        XCTAssertEqual(SpreadsheetModel.shiftedIndex(1, afterInsertAt: 2, count: 3), 1)
     }
 
     // MARK: - Column rules

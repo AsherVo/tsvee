@@ -223,13 +223,17 @@ final class SpreadsheetModel {
         onChange?()
     }
 
-    func insertRow(at index: Int) {
+    /// Inserts `count` blank rows — one insert, one undo step, however many
+    /// rows the selection asked for.
+    func insertRow(at index: Int, count: Int = 1) {
+        guard count > 0 else { return }
         let clamped = min(max(index, 0), rows.count)
-        rows.insert(Array(repeating: "", count: columnCount), at: clamped)
+        let blank = Array(repeating: "", count: columnCount)
+        rows.insert(contentsOf: Array(repeating: blank, count: count), at: clamped)
         undoManager?.registerUndo(withTarget: self) { model in
-            model.removeRows(IndexSet(integer: clamped))
+            model.removeRows(IndexSet(integersIn: clamped..<(clamped + count)))
         }
-        undoManager?.setActionName("Insert Row")
+        undoManager?.setActionName(count == 1 ? "Insert Row" : "Insert Rows")
         recomputeDuplicates()
         onChange?()
     }
@@ -256,14 +260,17 @@ final class SpreadsheetModel {
         onChange?()
     }
 
-    func insertColumn(at index: Int) {
+    func insertColumn(at index: Int, count: Int = 1) {
+        guard count > 0 else { return }
         let clamped = min(max(index, 1), columnCount)  // never before the ID column
-        columnCount += 1
-        for i in rows.indices { rows[i].insert("", at: clamped) }
-        undoManager?.registerUndo(withTarget: self) { model in
-            model.removeColumns(IndexSet(integer: clamped))
+        columnCount += count
+        for i in rows.indices {
+            rows[i].insert(contentsOf: Array(repeating: "", count: count), at: clamped)
         }
-        undoManager?.setActionName("Insert Column")
+        undoManager?.registerUndo(withTarget: self) { model in
+            model.removeColumns(IndexSet(integersIn: clamped..<(clamped + count)))
+        }
+        undoManager?.setActionName(count == 1 ? "Insert Column" : "Insert Columns")
         onChange?()
     }
 
@@ -355,15 +362,16 @@ final class SpreadsheetModel {
         return mapping
     }
 
-    /// Where per-row state (a `.tss` height, a collapsed section) lands after a
-    /// row is inserted at `insertion`.
-    static func shiftedRowIndex(_ index: Int, afterInsertAt insertion: Int) -> Int {
-        index >= insertion ? index + 1 : index
+    /// Where per-row or per-column `.tss` state (a height, a width, a data
+    /// type, a collapsed section) lands after `count` rows/columns are
+    /// inserted at `insertion`. The arithmetic is the same on both axes.
+    static func shiftedIndex(_ index: Int, afterInsertAt insertion: Int, count: Int = 1) -> Int {
+        index >= insertion ? index + count : index
     }
 
-    /// Where per-row state lands after `removed` rows are deleted — nil when
-    /// the row it was attached to is one of them.
-    static func shiftedRowIndex(_ index: Int, afterRemoving removed: IndexSet) -> Int? {
+    /// Where that state lands after `removed` rows/columns are deleted — nil
+    /// when the one it was attached to is among them.
+    static func shiftedIndex(_ index: Int, afterRemoving removed: IndexSet) -> Int? {
         guard !removed.contains(index) else { return nil }
         return index - removed.count(in: 0..<index)
     }

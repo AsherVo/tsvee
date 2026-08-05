@@ -120,6 +120,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// the rest of the view's geometry, drawing, and hit testing come along for
     /// free.
     private var hiddenRows: Set<Int> = []
+    /// Collapsed header row → the last row it folds away. Derived alongside
+    /// `hiddenRows`, and what lets a selection reach into a fold at its end.
+    private var foldEnds: [Int: Int] = [:]
 
     private var anchor = GridPos(row: 0, col: 0)
     private var focus = GridPos(row: 0, col: 0)
@@ -266,11 +269,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// editing the "#" off a header always brings its rows back.
     private func recomputeHiddenRows(model: SpreadsheetModel) {
         var hidden: Set<Int> = []
+        var ends: [Int: Int] = [:]
         for row in collapsedRows {
             guard let body = model.sectionBody(ofRow: row) else { continue }
             hidden.formUnion(body)
+            ends[row] = body.upperBound
         }
         hiddenRows = hidden
+        foldEnds = ends
     }
 
     private func rebuildOffsets() {
@@ -355,7 +361,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         return at
     }
 
-    private var selectedRows: ClosedRange<Int> { min(anchor.row, focus.row)...max(anchor.row, focus.row) }
+    /// The selected rows, reaching down over a section that's folded away at
+    /// the end of the selection. A fold in the *middle* of a selection is
+    /// already inside the range, so the tail has to behave the same way —
+    /// otherwise Select All quietly misses a collapsed last section, and the
+    /// cursor can't reach past the header to include it (it's pulled out of
+    /// folds on purpose). A body always sits directly below its header, so the
+    /// reach stays contiguous.
+    private var selectedRows: ClosedRange<Int> {
+        let first = min(anchor.row, focus.row), last = max(anchor.row, focus.row)
+        var end = last
+        for (header, foldedThrough) in foldEnds where header >= first && header <= last {
+            end = max(end, foldedThrough)
+        }
+        return first...end
+    }
     private var selectedCols: ClosedRange<Int> { min(anchor.col, focus.col)...max(anchor.col, focus.col) }
     private var isFullRowSelection: Bool { selectedCols == 0...(gridCols - 1) }
     private var isFullColumnSelection: Bool { selectedRows == 0...(gridRows - 1) }
@@ -1375,32 +1395,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         scrollToVisible(rect)
     }
 
-    /// The rows the tally covers: the selection, reaching down over anything
-    /// folded under a collapsed header inside it. A folded section's rows are
-    /// part of what you selected — you just can't see them — and selecting a
-    /// collapsed header is the only way to select them at all. A section body
-    /// always sits directly below its header, so the reach stays contiguous.
-    private func talliedRows() -> ClosedRange<Int> {
-        var last = selectedRows.upperBound
-        if let model {
-            for header in collapsedRows where selectedRows.contains(header) {
-                if let body = model.sectionBody(ofRow: header) {
-                    last = max(last, body.upperBound)
-                }
-            }
-        }
-        return selectedRows.lowerBound...last
-    }
-
     /// Populated / empty tally for a multi-cell selection, for the formula bar.
     /// nil for a lone cell (whose content is already right there in the bar)
     /// and for a selection with nothing countable in it. A collapsed header is
     /// never a lone cell: it stands in for everything folded under it.
     func selectionTally() -> SelectionTally? {
-        guard let model else { return nil }
-        let rows = talliedRows()
-        guard rows.count * selectedCols.count > 1 else { return nil }
-        let tally = model.tally(rows: rows, columns: selectedCols,
+        guard let model, selectedRows.count * selectedCols.count > 1 else { return nil }
+        let tally = model.tally(rows: selectedRows, columns: selectedCols,
                                 booleanColumns: booleanColumnIndices)
         let total = tally.populated + tally.empty
         guard total > 0 else { return nil }
@@ -1702,19 +1703,26 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Row / column commands (Sheet menu + context menu)
 
+    /// Insert / delete work in units of the selection: three selected rows
+    /// insert three, the way a spreadsheet is expected to behave.
+    private var insertRowCount: Int { selectedRows.count }
+    private var insertColumnCount: Int { selectedCols.count }
+
     @objc func insertRowAbove(_ sender: Any?) {
         guard let model else { return }
-        let at = selectedRows.lowerBound
-        shiftRowFormatting { SpreadsheetModel.shiftedRowIndex($0, afterInsertAt: at) }
-        model.insertRow(at: at)
+        let at = min(selectedRows.lowerBound, model.rowCount)   // as the model clamps
+        let count = insertRowCount
+        shiftRowFormatting { SpreadsheetModel.shiftedIndex($0, afterInsertAt: at, count: count) }
+        model.insertRow(at: at, count: count)
     }
 
     @objc func insertRowBelow(_ sender: Any?) {
         guard let model else { return }
         let at = insertionBoundary(min(selectedRows.upperBound + 1, model.rowCount),
                                    rowCount: model.rowCount)
-        shiftRowFormatting { SpreadsheetModel.shiftedRowIndex($0, afterInsertAt: at) }
-        model.insertRow(at: at)
+        let count = insertRowCount
+        shiftRowFormatting { SpreadsheetModel.shiftedIndex($0, afterInsertAt: at, count: count) }
+        model.insertRow(at: at, count: count)
     }
 
     @objc func deleteSelectedRows(_ sender: Any?) {
@@ -1723,7 +1731,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // Mirror removeRows' own guard so the formatting shift can't run ahead
         // of a rejected deletion.
         guard !indexes.isEmpty, indexes.count < model.rowCount else { return }
-        shiftRowFormatting { SpreadsheetModel.shiftedRowIndex($0, afterRemoving: indexes) }
+        shiftRowFormatting { SpreadsheetModel.shiftedIndex($0, afterRemoving: indexes) }
         model.removeRows(indexes)
     }
 
@@ -1740,6 +1748,39 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
         setRowFormatting(heights: heights,
                          collapsed: Set(format.collapsedSections.compactMap(transform)))
+    }
+
+    /// Re-keys per-column `.tss` state (widths, data types) so it stays with
+    /// its content when columns are inserted or deleted to its left. State on a
+    /// deleted column is dropped.
+    private func shiftColumnFormatting(_ transform: (Int) -> Int?) {
+        guard let format = formatProvider?(),
+              !format.columnWidths.isEmpty || !format.columnTypes.isEmpty else { return }
+        var widths: [Int: CGFloat] = [:]
+        for (column, width) in format.columnWidths {
+            if let moved = transform(column) { widths[moved] = width }
+        }
+        var types: [Int: ColumnType] = [:]
+        for (column, type) in format.columnTypes {
+            if let moved = transform(column) { types[moved] = type }
+        }
+        setColumnFormatting(widths: widths, types: types)
+    }
+
+    /// The per-column counterpart of `setRowFormatting`.
+    private func setColumnFormatting(widths: [Int: CGFloat], types: [Int: ColumnType]) {
+        guard let format = formatProvider?() else { return }
+        let previousWidths = format.columnWidths
+        let previousTypes = format.columnTypes
+        guard widths != previousWidths || types != previousTypes else { return }
+        onFormatChange? {
+            $0.columnWidths = widths
+            $0.columnTypes = types
+        }
+        undoManager?.registerUndo(withTarget: self) { view in
+            view.setColumnFormatting(widths: previousWidths, types: previousTypes)
+        }
+        modelDidChange()
     }
 
     /// Replaces the per-row `.tss` state wholesale, registering the exact
@@ -1761,17 +1802,31 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     @objc func insertColumnLeft(_ sender: Any?) {
-        model?.insertColumn(at: max(selectedCols.lowerBound, 1))
+        guard let model else { return }
+        insertColumns(at: max(selectedCols.lowerBound, 1), model: model)
     }
 
     @objc func insertColumnRight(_ sender: Any?) {
         guard let model else { return }
-        model.insertColumn(at: min(selectedCols.upperBound + 1, model.columnCount))
+        insertColumns(at: min(selectedCols.upperBound + 1, model.columnCount), model: model)
+    }
+
+    private func insertColumns(at index: Int, model: SpreadsheetModel) {
+        // Clamp exactly as the model does (a selection can reach into the
+        // phantom columns), so the formatting shift agrees with the insert.
+        let at = min(max(index, 1), model.columnCount)
+        let count = insertColumnCount
+        shiftColumnFormatting { SpreadsheetModel.shiftedIndex($0, afterInsertAt: at, count: count) }
+        model.insertColumn(at: at, count: count)
     }
 
     @objc func deleteSelectedColumns(_ sender: Any?) {
         guard let model else { return }
         let indexes = IndexSet(selectedCols.filter { $0 >= 1 && $0 < model.columnCount })
+        // Mirror removeColumns' own guard so the formatting shift can't run
+        // ahead of a rejected deletion.
+        guard !indexes.isEmpty else { return }
+        shiftColumnFormatting { SpreadsheetModel.shiftedIndex($0, afterRemoving: indexes) }
         model.removeColumns(indexes)
     }
 
@@ -2023,14 +2078,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         menu.addItem(withTitle: "Cut", action: #selector(cut(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Insert Row Above", action: #selector(insertRowAbove(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Insert Row Below", action: #selector(insertRowBelow(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Delete Rows", action: #selector(deleteSelectedRows(_:)), keyEquivalent: "")
-        menu.addItem(.separator())
-        menu.addItem(withTitle: "Insert Column Left", action: #selector(insertColumnLeft(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Insert Column Right", action: #selector(insertColumnRight(_:)), keyEquivalent: "")
-        menu.addItem(withTitle: "Delete Columns", action: #selector(deleteSelectedColumns(_:)), keyEquivalent: "")
+        // Selecting whole columns is a statement about columns: row commands
+        // there would act on the entire sheet, so they don't belong in the
+        // menu at all (and vice versa).
+        if !isFullColumnSelection {
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Insert Row Above", action: #selector(insertRowAbove(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Insert Row Below", action: #selector(insertRowBelow(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Delete Rows", action: #selector(deleteSelectedRows(_:)), keyEquivalent: "")
+        }
+        if !isFullRowSelection {
+            menu.addItem(.separator())
+            menu.addItem(withTitle: "Insert Column Left", action: #selector(insertColumnLeft(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Insert Column Right", action: #selector(insertColumnRight(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Delete Columns", action: #selector(deleteSelectedColumns(_:)), keyEquivalent: "")
+        }
 
         // Column formatting — hidden for whole-row selections, where "the
         // selected columns" would mean every column in the sheet.
@@ -2082,11 +2144,31 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let format = formatProvider?() ?? TSSFormat()
             menuItem.state = format.freezeIDColumn ? .on : .off
             return true
+        // Insert titles count what they'll actually do, in both menus. Row
+        // commands stay out of the way of a whole-column selection (where they
+        // would act on the entire sheet), and vice versa — the context menu
+        // drops them outright, the Sheet menu greys them out.
+        case #selector(insertRowAbove(_:)):
+            menuItem.title = insertRowCount == 1
+                ? "Insert Row Above" : "Insert \(insertRowCount) Rows Above"
+            return !isFullColumnSelection
+        case #selector(insertRowBelow(_:)):
+            menuItem.title = insertRowCount == 1
+                ? "Insert Row Below" : "Insert \(insertRowCount) Rows Below"
+            return !isFullColumnSelection
+        case #selector(insertColumnLeft(_:)):
+            menuItem.title = insertColumnCount == 1
+                ? "Insert Column Left" : "Insert \(insertColumnCount) Columns Left"
+            return !isFullRowSelection
+        case #selector(insertColumnRight(_:)):
+            menuItem.title = insertColumnCount == 1
+                ? "Insert Column Right" : "Insert \(insertColumnCount) Columns Right"
+            return !isFullRowSelection
         case #selector(deleteSelectedColumns(_:)):
-            guard let model else { return false }
+            guard let model, !isFullRowSelection else { return false }
             return selectedCols.contains(where: { $0 >= 1 && $0 < model.columnCount })
         case #selector(deleteSelectedRows(_:)):
-            guard let model else { return false }
+            guard let model, !isFullColumnSelection else { return false }
             return selectedRows.lowerBound < model.rowCount && model.rowCount > 1
         case #selector(jumpToNextDuplicateID(_:)):
             return !(model?.duplicateIDRows.isEmpty ?? true)

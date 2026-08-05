@@ -69,7 +69,11 @@ bundle` app carries).
 - The grid extends past your data with phantom rows/columns; editing one
   grows the file (trailing empty rows/columns are trimmed on save).
 - Right-click for insert/delete row & column operations (also in the Sheet
-  menu). The ID column can't be deleted or displaced.
+  menu). Insert works in units of the selection — three selected rows insert
+  three, and the menu says so (**Insert 3 Rows Above**) — in one undo step.
+  Selecting whole columns shows only the column commands (and vice versa),
+  since the other axis would be acting on the entire sheet. The ID column
+  can't be deleted or displaced.
 - Full undo/redo.
 
 ## Collapsing sections
@@ -88,7 +92,10 @@ same or higher level — so collapsing `# Enemies` folds its `## Forest` and
   The skipped row numbers and a firm line under the header mark the seam, and
   a **“12 rows” badge** in the header's ID cell says how much is folded away.
 - Arrow keys step over a folded section in one press, and the cursor is never
-  left inside one. Autofill drags stop at a fold rather than writing into
+  left inside one. A selection that ends on a collapsed header still covers
+  everything folded under it — the same way a fold in the middle of a
+  selection is already inside it — so Select All doesn't miss a collapsed last
+  section, and copy/clear/delete treat the fold as part of the selection. Autofill drags stop at a fold rather than writing into
   cells you can't see. Cross-file ID jumps and ⇧⌘D unfold whatever is hiding
   the row they land on.
 - Collapse state lives in the `.tss` sidecar, so it survives reopening and
@@ -159,9 +166,10 @@ freeze	fieldrow|idcol	0|1
 The UI writes column widths (drag-resize a column), column types, collapsed
 sections and the freeze toggles today; freeze records are only written when a
 pane is un-frozen, since frozen is the default, and `raw` column types are
-never written. Per-row records (`rowheight`, `collapsed`) are re-keyed when
-rows are inserted, deleted or reordered, so they stay attached to their
-content. Unknown record types are preserved verbatim on rewrite, so future
+never written. Per-row records (`rowheight`, `collapsed`) and per-column ones
+(`colwidth`, `coltype`) are re-keyed when rows/columns are inserted, deleted or
+reordered, so they stay attached to their content, and state on something
+deleted is dropped rather than relocated. Unknown record types are preserved verbatim on rewrite, so future
 fields — cell styles, merged headers, calculated columns — can be added in
 `TSSFormat.swift` without breaking older files. That's the extension point:
 add a record type to `parse`/`serialize` and consume it in
