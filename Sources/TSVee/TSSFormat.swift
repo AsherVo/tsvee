@@ -22,6 +22,27 @@ enum ColumnType: String {
     case integer
     case float
     case text
+    case boolean
+}
+
+/// What a `boolean` cell holds. The file only ever carries `TRUE`/`FALSE` —
+/// an empty cell reads as false, and anything else is data the column type
+/// doesn't describe, which TSVee flags rather than rewrites.
+enum BooleanCell {
+    case on
+    case off
+    case invalid
+
+    init(_ raw: String) {
+        switch raw.trimmingCharacters(in: .whitespaces).uppercased() {
+        case "TRUE": self = .on
+        case "", "FALSE": self = .off
+        default: self = .invalid
+        }
+    }
+
+    /// What clicking a checkbox writes.
+    static func literal(_ on: Bool) -> String { on ? "TRUE" : "FALSE" }
 }
 
 struct TSSFormat {

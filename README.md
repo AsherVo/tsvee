@@ -76,7 +76,8 @@ same or higher level — so collapsing `# Enemies` folds its `## Forest` and
   the cursor is in; **Collapse / Expand All Sections** (⌥⇧⌘← / ⌥⇧⌘→) act on
   the whole sheet. Both pairs are also on the right-click menu.
 - Folded rows are hidden, not changed — **the TSV on disk is untouched**.
-  The skipped row numbers and a firm line under the header mark the seam.
+  The skipped row numbers and a firm line under the header mark the seam, and
+  a **“12 rows” badge** in the header's ID cell says how much is folded away.
 - Arrow keys step over a folded section in one press, and the cursor is never
   left inside one. Autofill drags stop at a fold rather than writing into
   cells you can't see. Cross-file ID jumps and ⇧⌘D unfold whatever is hiding
@@ -96,6 +97,11 @@ Right-click a column (header or any cell) → **Column Data Type**:
   text cell. Misspellings get a red squiggle in the grid (not just while
   editing), and right-clicking one offers corrections plus **Ignore
   Spelling** / **Learn Spelling**.
+- **Boolean** — a checkbox on every line that has an ID; the file holds
+  `TRUE` or `FALSE` (empty reads as false). Click the box or hit **space** to
+  toggle — space toggles the whole selection at once. Values that aren't
+  `TRUE`/`FALSE` are shown in red rather than coerced, and lines with no ID
+  get no checkbox.
 
 Types are per-column formatting, stored in the `.tss` sidecar, and they
 follow their column when you drag-reorder. Header (`#`) rows and the
@@ -136,7 +142,7 @@ v0 wire format — one tab-separated record per line:
 tss	0
 colwidth	<columnIndex>	<points>
 rowheight	<rowIndex>	<points>
-coltype	<columnIndex>	raw|integer|float|text
+coltype	<columnIndex>	raw|integer|float|text|boolean
 collapsed	<headerRowIndex>	1
 freeze	fieldrow|idcol	0|1
 ```

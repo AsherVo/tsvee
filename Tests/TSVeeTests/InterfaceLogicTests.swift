@@ -142,6 +142,27 @@ final class ColumnTypeTests: XCTestCase {
         XCTAssertNil(parsed.columnTypes[0])
     }
 
+    func testBooleanRoundTrip() {
+        var format = TSSFormat()
+        format.columnTypes[3] = .boolean
+        XCTAssertTrue(format.serialize().contains("coltype\t3\tboolean"))
+        XCTAssertEqual(TSSFormat.parse(format.serialize()).columnTypes[3], .boolean)
+    }
+
+    func testBooleanCellParsing() {
+        XCTAssertEqual(BooleanCell("TRUE"), .on)
+        XCTAssertEqual(BooleanCell("true"), .on)
+        XCTAssertEqual(BooleanCell(" TRUE "), .on)
+        XCTAssertEqual(BooleanCell("FALSE"), .off)
+        XCTAssertEqual(BooleanCell(""), .off)
+        // Anything else is data the type doesn't describe — flagged, not coerced.
+        XCTAssertEqual(BooleanCell("1"), .invalid)
+        XCTAssertEqual(BooleanCell("yes"), .invalid)
+        XCTAssertEqual(BooleanCell("TRUE!"), .invalid)
+        XCTAssertEqual(BooleanCell.literal(true), "TRUE")
+        XCTAssertEqual(BooleanCell.literal(false), "FALSE")
+    }
+
     func testRawIsNeverPersisted() {
         var format = TSSFormat()
         format.columnTypes[1] = .raw

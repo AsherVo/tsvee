@@ -37,6 +37,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         static let toggleSize: CGFloat = 9
         static let toggleHitWidth: CGFloat = 17
         static let frozenEdgeThickness: CGFloat = 3
+        /// Checkbox for `boolean` columns, and the slop around it that still
+        /// counts as a click on it.
+        static let checkboxSize: CGFloat = 14
+        static let checkboxHitMargin: CGFloat = 3
     }
 
     private enum Palette {
@@ -60,6 +64,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         static var frozenEdge: NSColor { NSColor.separatorColor.withAlphaComponent(1.0) }
+
+        /// The "N rows" pill on a collapsed section header.
+        static var badgeFill: NSColor { NSColor.labelColor.withAlphaComponent(0.10) }
+
+        /// `boolean` checkboxes, borrowing the system's own control colors.
+        static var checkboxOn: NSColor { .controlAccentColor }
+        static var checkboxMark: NSColor { .white }
+        static var checkboxOff: NSColor { NSColor.tertiaryLabelColor }
     }
 
     // MARK: - Wiring
@@ -267,6 +279,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                height: yOffsets[row + 1] - yOffsets[row])
     }
 
+    /// Where a cell actually appears: its document rect, shifted by the scroll
+    /// offset when it lives in a frozen pane (frozen content is drawn pinned to
+    /// the viewport edge).
+    private func cellScreenRect(_ pos: GridPos) -> NSRect {
+        let vis = visibleRect
+        var rect = cellRect(pos.row, pos.col)
+        if pos.col < frozenColCount { rect.origin.x += vis.minX }
+        if pos.row < frozenRowCount { rect.origin.y += vis.minY }
+        return rect
+    }
+
     private func rectFor(rows: ClosedRange<Int>, cols: ClosedRange<Int>) -> NSRect {
         NSRect(x: xOffsets[cols.lowerBound],
                y: yOffsets[rows.lowerBound],
@@ -456,11 +479,22 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             for c in cols {
                 guard c < model.columnCount else { break }
                 let text = model.value(row: r, column: c)
-                guard !text.isEmpty else { continue }
                 if editingCell == GridPos(row: r, col: c) { continue }
                 let rect = cellRect(r, c)
                 let font = cellFont(forRow: r, column: c)
                 let type = plainRow ? (cachedTypes[c] ?? .raw) : .raw
+                // Empty cells have nothing to draw — except in a `boolean`
+                // column, where empty is an unchecked box.
+                guard !text.isEmpty || type == .boolean else { continue }
+
+                // A collapsed header says how much is folded away, pinned to
+                // the right of its ID cell. The name is clipped short of the
+                // badge rather than running underneath it.
+                var textClip = rect.insetBy(dx: 1, dy: 1)
+                if c == 0, let label = foldedRowsLabel(forRow: r) {
+                    let pill = drawBadge(label, rightAlignedIn: rect)
+                    textClip.size.width = max(pill.minX - 4 - textClip.minX, 0)
+                }
 
                 switch type {
                 case .text:
@@ -469,6 +503,25 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     textRenderer.draw(text, font: font, color: rowColor,
                                       in: rect.insetBy(dx: 6, dy: 4),
                                       misspellings: spellIndex.misspellings(in: text))
+                case .boolean:
+                    if let checked = checkboxState(at: GridPos(row: r, col: c)) {
+                        drawCheckbox(in: checkboxRect(in: rect), checked: checked)
+                    } else if !text.isEmpty {
+                        // No checkbox to draw here: either the line has no ID,
+                        // or the value isn't TRUE/FALSE. Show it as-is, red when
+                        // it's data the type doesn't describe.
+                        let attrs: [NSAttributedString.Key: Any] = [
+                            .font: font,
+                            .foregroundColor: BooleanCell(text) == .invalid
+                                ? NSColor.systemRed : rowColor,
+                        ]
+                        let size = text.size(withAttributes: attrs)
+                        cg.saveGState()
+                        textClip.clip()
+                        text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
+                                  withAttributes: attrs)
+                        cg.restoreGState()
+                    }
                 case .integer, .float:
                     let valid = type == .integer ? Int(text) != nil : Double(text) != nil
                     let attrs: [NSAttributedString.Key: Any] = [
@@ -477,7 +530,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     ]
                     let size = text.size(withAttributes: attrs)
                     cg.saveGState()
-                    rect.insetBy(dx: 1, dy: 1).clip()
+                    textClip.clip()
                     text.draw(at: NSPoint(x: rect.maxX - size.width - 6, y: rect.midY - size.height / 2),
                               withAttributes: attrs)
                     cg.restoreGState()
@@ -488,7 +541,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     ]
                     let size = text.size(withAttributes: attrs)
                     cg.saveGState()
-                    rect.insetBy(dx: 1, dy: 1).clip()
+                    textClip.clip()
                     text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
                               withAttributes: attrs)
                     cg.restoreGState()
@@ -521,6 +574,86 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         cg.restoreGState()
+    }
+
+    // MARK: - Checkboxes (`boolean` columns)
+
+    /// State of the checkbox drawn in a cell, or nil where no checkbox belongs:
+    /// not a `boolean` column, a header / field-name row, a line with no ID (a
+    /// checkbox there would have no row to belong to), or a value that isn't
+    /// TRUE/FALSE.
+    private func checkboxState(at pos: GridPos) -> Bool? {
+        guard let model, cachedTypes[pos.col] == .boolean,
+              pos.row < model.rowCount, pos.col < model.columnCount,
+              model.headerLevel(ofRow: pos.row) == 0, !model.isFieldNameRow(pos.row),
+              !model.value(row: pos.row, column: 0).isEmpty else { return nil }
+        switch BooleanCell(model.value(row: pos.row, column: pos.col)) {
+        case .on: return true
+        case .off: return false
+        case .invalid: return nil
+        }
+    }
+
+    private func checkboxRect(in cell: NSRect) -> NSRect {
+        let size = Metrics.checkboxSize
+        return NSRect(x: (cell.midX - size / 2).rounded(),
+                      y: (cell.midY - size / 2).rounded(),
+                      width: size, height: size)
+    }
+
+    /// Clickable checkbox at a cell, in on-screen coordinates, or nil if that
+    /// cell has no checkbox.
+    private func checkboxHitRect(at pos: GridPos) -> NSRect? {
+        guard checkboxState(at: pos) != nil else { return nil }
+        return checkboxRect(in: cellScreenRect(pos))
+            .insetBy(dx: -Metrics.checkboxHitMargin, dy: -Metrics.checkboxHitMargin)
+    }
+
+    private func drawCheckbox(in rect: NSRect, checked: Bool) {
+        let box = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+        box.lineWidth = 1
+        if checked {
+            Palette.checkboxOn.setFill()
+            box.fill()
+            // Flipped view: maxY is the bottom, so the middle point of the
+            // check is the low one.
+            let check = NSBezierPath()
+            check.move(to: NSPoint(x: rect.minX + 3.5, y: rect.midY + 0.5))
+            check.line(to: NSPoint(x: rect.minX + 5.5, y: rect.maxY - 4))
+            check.line(to: NSPoint(x: rect.maxX - 3.5, y: rect.minY + 4.5))
+            check.lineWidth = 1.8
+            check.lineCapStyle = .round
+            check.lineJoinStyle = .round
+            Palette.checkboxMark.setStroke()
+            check.stroke()
+        } else {
+            NSColor.textBackgroundColor.setFill()
+            box.fill()
+            Palette.checkboxOff.setStroke()
+            box.stroke()
+        }
+    }
+
+    private func toggleCheckbox(at pos: GridPos) {
+        guard let model, let checked = checkboxState(at: pos) else { return }
+        model.setValue(BooleanCell.literal(!checked), row: pos.row, column: pos.col)
+        undoManager?.setActionName("Toggle Checkbox")
+        needsDisplay = true
+    }
+
+    /// Space bar: flips every checkbox in the selection to the opposite of the
+    /// focused cell's state, so a multi-cell selection lands uniform.
+    private func toggleCheckboxesInSelection() {
+        guard let model, let checked = checkboxState(at: focus) else { return }
+        let newValue = BooleanCell.literal(!checked)
+        for r in selectedRows where r < model.rowCount {
+            for c in selectedCols where c < model.columnCount {
+                guard checkboxState(at: GridPos(row: r, col: c)) != nil else { continue }
+                model.setValue(newValue, row: r, column: c)
+            }
+        }
+        undoManager?.setActionName("Toggle Checkbox")
+        needsDisplay = true
     }
 
     private func cellFont(forRow row: Int) -> NSFont {
@@ -662,6 +795,34 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         path.close()
         (collapsed ? NSColor.controlAccentColor : Palette.chromeText).setFill()
         path.fill()
+    }
+
+    /// "12 rows" for a collapsed section header, nil for every other row —
+    /// what a folded header owes you, since the rows themselves are gone.
+    private func foldedRowsLabel(forRow row: Int) -> String? {
+        guard collapsedRows.contains(row), let model,
+              let body = model.sectionBody(ofRow: row) else { return nil }
+        return body.count == 1 ? "1 row" : "\(body.count) rows"
+    }
+
+    private static let badgeAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 10.5, weight: .medium),
+        .foregroundColor: NSColor.secondaryLabelColor,
+    ]
+
+    /// Draws a small pill at the right edge of `cell` and returns its frame, so
+    /// the caller can keep the cell's own text clear of it.
+    @discardableResult
+    private func drawBadge(_ label: String, rightAlignedIn cell: NSRect) -> NSRect {
+        let size = label.size(withAttributes: Self.badgeAttributes)
+        let pill = NSRect(x: (cell.maxX - size.width - 16).rounded(),
+                          y: (cell.midY - size.height / 2 - 2).rounded(),
+                          width: (size.width + 12).rounded(), height: (size.height + 4).rounded())
+        Palette.badgeFill.setFill()
+        NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
+        label.draw(at: NSPoint(x: pill.minX + 6, y: pill.midY - size.height / 2),
+                   withAttributes: Self.badgeAttributes)
+        return pill
     }
 
     /// On-screen hit box for a header row's triangle — the left edge of the
@@ -819,7 +980,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             }
             dragMode = .selectCells
             selectionDidChange()
-            if event.clickCount == 2 {
+            // Hitting a checkbox toggles it rather than starting a drag or an
+            // edit — including on a double-click, which just toggles twice.
+            if !shift, let box = checkboxHitRect(at: pos), box.contains(p) {
+                dragMode = .none
+                toggleCheckbox(at: pos)
+            } else if event.clickCount == 2 {
                 beginEditing(at: pos, initialText: nil)
             }
         }
@@ -970,6 +1136,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             }
         case .sectionToggle:
             NSCursor.pointingHand.set()
+        case .cell(let pos):
+            if let box = checkboxHitRect(at: pos), box.contains(p) {
+                NSCursor.pointingHand.set()
+            } else {
+                NSCursor.arrow.set()
+            }
         case .rowHeader(let r):
             if isFullRowSelection, selectedRows.contains(r) {
                 NSCursor.openHand.set()
@@ -1122,6 +1294,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let mods = event.modifierFlags
         let shift = mods.contains(.shift)
 
+        // Space toggles checkboxes in `boolean` columns; anywhere else it falls
+        // through and types a space.
+        if Int(scalar) == 32, !mods.contains(.command), !mods.contains(.control),
+           checkboxState(at: focus) != nil {
+            toggleCheckboxesInSelection()
+            return
+        }
+
         switch Int(scalar) {
         case NSUpArrowFunctionKey: move(dRow: -1, dCol: 0, extend: shift)
         case NSDownArrowFunctionKey: move(dRow: 1, dCol: 0, extend: shift)
@@ -1206,10 +1386,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         scrollCellToVisible(pos)
 
         // Frozen cells render pinned to the viewport; the editor must match.
-        let vis = visibleRect
-        var frame = cellRect(pos.row, pos.col).insetBy(dx: 1, dy: 1)
-        if pos.col < frozenColCount { frame.origin.x += vis.minX }
-        if pos.row < frozenRowCount { frame.origin.y += vis.minY }
+        let frame = cellScreenRect(pos).insetBy(dx: 1, dy: 1)
 
         let isTextColumn = isTextCell(pos)
 
@@ -1587,6 +1764,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard !cols.isEmpty else { return }
         onFormatChange? { format in
             for c in cols {
+                // A checkbox is a fixed size, so the text in the file (TRUE /
+                // FALSE) says nothing about how wide the column needs to be.
+                if format.columnTypes[c] == .boolean {
+                    format.columnWidths[c] = Metrics.minColWidth
+                    continue
+                }
                 // Pre-filter by character count so huge sheets only measure a
                 // handful of candidate strings.
                 var candidates: [(row: Int, count: Int)] = []
@@ -1638,11 +1821,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     /// Where a cell's text is actually drawn, frozen panes included.
     private func textAreaScreenRect(_ pos: GridPos) -> NSRect {
-        let vis = visibleRect
-        var rect = cellRect(pos.row, pos.col).insetBy(dx: 6, dy: 4)
-        if pos.col < frozenColCount { rect.origin.x += vis.minX }
-        if pos.row < frozenRowCount { rect.origin.y += vis.minY }
-        return rect
+        cellScreenRect(pos).insetBy(dx: 6, dy: 4)
     }
 
     /// The misspelled word under a click, if the click landed on one.
@@ -1818,7 +1997,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 .filter { $0 < model.columnCount }
                 .map { cachedTypes[$0] ?? .raw })
             for (title, type) in [("Raw", ColumnType.raw), ("Integer", .integer),
-                                  ("Float", .float), ("Text", .text)] {
+                                  ("Float", .float), ("Text", .text), ("Boolean", .boolean)] {
                 let item = NSMenuItem(title: title, action: #selector(setColumnType(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = type.rawValue
