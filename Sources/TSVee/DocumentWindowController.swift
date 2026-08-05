@@ -30,6 +30,7 @@ final class DocumentWindowController: NSWindowController {
             mutate(&document.format)
             document.noteFormatChanged()
         }
+        spreadsheetView.documentURLProvider = { [weak document] in document?.fileURL }
         spreadsheetView.model = document.model
 
         let scrollView = NSScrollView()

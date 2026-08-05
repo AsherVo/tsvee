@@ -159,6 +159,21 @@ final class SpreadsheetModel {
         (0..<rows.count).filter { sectionBody(ofRow: $0) != nil }
     }
 
+    /// The ID of every entry, in sheet order, deduplicated — what a select
+    /// column pointed at this sheet offers as its options. Headers, comments,
+    /// the field-name row and ID-less rows aren't entries.
+    func entryIDs() -> [String] {
+        var seen = Set<String>()
+        var ids: [String] = []
+        for (index, row) in rows.enumerated() {
+            let id = row[0]
+            guard !id.isEmpty, !id.hasPrefix("#"), !isFieldNameRow(index),
+                  seen.insert(id).inserted else { continue }
+            ids.append(id)
+        }
+        return ids
+    }
+
     /// First row whose ID matches exactly (used for cross-file navigation).
     /// The field-name row doesn't count.
     func firstRow(withID id: String) -> Int? {

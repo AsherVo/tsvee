@@ -51,6 +51,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         /// counts as a click on it.
         static let checkboxSize: CGFloat = 14
         static let checkboxHitMargin: CGFloat = 3
+        /// Dropdown chevron for `select`/`multiselect` columns, and the strip
+        /// at the cell's right edge that opens the menu.
+        static let chevronSize: CGFloat = 8
+        static let chevronHitWidth: CGFloat = 20
     }
 
     private enum Palette {
@@ -93,6 +97,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// Read-modify-write access to the document's TSSFormat (marks it dirty).
     var onFormatChange: (((inout TSSFormat) -> Void) -> Void)?
     var onSelectionChange: (() -> Void)?
+    /// This document's file URL — the base that select columns resolve their
+    /// relative option-sheet paths against.
+    var documentURLProvider: (() -> URL?)?
 
     // MARK: - State
 
@@ -105,6 +112,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var cachedTypes: [Int: ColumnType] = [:]
     private var textColumnIndices: [Int] = []
     private var booleanColumnIndices: Set<Int> = []
+    private var cachedSelectSources: [Int: SelectSource] = [:]
+    /// Resolved option lists (and sets, for validation) per select column —
+    /// refreshed with the model/format, and when the window becomes key again
+    /// (the sheet the options come from may have been edited meanwhile).
+    private var selectOptions: [Int: [String]] = [:]
+    private var selectOptionSets: [Int: Set<String>] = [:]
+    private let optionsResolver = SelectOptionsResolver()
     /// Wrapped-text height memo, keyed by "width|text" (value-based, so it
     /// survives model changes).
     private var wrapHeightCache: [String: CGFloat] = [:]
@@ -131,6 +145,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var editingCell: GridPos?
     private var editSessionFromTyping = false
     private var isCommittingEdit = false
+
+    /// Autocomplete state while editing a select cell: the options to suggest
+    /// from, and — when a suggestion is showing — what the user actually typed
+    /// (the field holds typed text + the selected, unconfirmed remainder).
+    private var editingSelectOptions: [String]?
+    private var editingSelectIsMulti = false
+    private var selectSuggestionBase: String?
+    private var lastEditorText = ""
+    private var isAutocompleting = false
 
     private enum FillDirection { case up, down, left, right }
 
@@ -175,10 +198,23 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard let clipView = enclosingScrollView?.contentView else { return }
-        NotificationCenter.default.addObserver(
-            self, selector: #selector(clipBoundsChanged),
-            name: NSView.boundsDidChangeNotification, object: clipView)
+        NotificationCenter.default.removeObserver(self)
+        if let clipView = enclosingScrollView?.contentView {
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(clipBoundsChanged),
+                name: NSView.boundsDidChangeNotification, object: clipView)
+        }
+        if let window {
+            // Select options resolved from another sheet may have changed
+            // while that sheet had focus; re-resolve on the way back in.
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(windowBecameKey),
+                name: NSWindow.didBecomeKeyNotification, object: window)
+        }
+    }
+
+    @objc private func windowBecameKey() {
+        modelDidChange()
     }
 
     @objc private func clipBoundsChanged() {
@@ -253,6 +289,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         cachedTypes = format.columnTypes
         textColumnIndices = format.columnTypes.filter { $0.value == .text }.keys.sorted()
         booleanColumnIndices = Set(format.columnTypes.filter { $0.value == .boolean }.keys)
+        cachedSelectSources = format.selectSources
+        refreshSelectOptions(format: format)
         frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
         frozenColCount = format.freezeIDColumn ? 1 : 0
         gridRows = model.rowCount + Metrics.phantomRows
@@ -516,8 +554,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 let font = cellFont(forRow: r, column: c)
                 let type = plainRow ? (cachedTypes[c] ?? .raw) : .raw
                 // Empty cells have nothing to draw — except in a `boolean`
-                // column, where empty is an unchecked box.
-                guard !text.isEmpty || type == .boolean else { continue }
+                // column (empty is an unchecked box) or a select column
+                // (empty still gets its dropdown chevron).
+                guard !text.isEmpty || type == .boolean
+                    || type == .select || type == .multiselect else { continue }
 
                 // A collapsed header says how much is folded away, pinned to
                 // the right of its ID cell. The name is clipped short of the
@@ -554,6 +594,31 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                                   withAttributes: attrs)
                         cg.restoreGState()
                     }
+                case .select, .multiselect:
+                    let pos = GridPos(row: r, col: c)
+                    var color = rowColor
+                    if selectCellKind(at: pos) != nil {
+                        // The chevron marks the dropdown; text is clipped
+                        // short of it. Values the options don't cover go red.
+                        drawDropdownChevron(in: chevronRect(in: rect))
+                        textClip.size.width = max(
+                            rect.maxX - Metrics.chevronHitWidth - textClip.minX, 0)
+                        if !SelectCell.isValid(text, options: selectOptionSets[c] ?? [],
+                                               multi: type == .multiselect) {
+                            color = .systemRed
+                        }
+                    }
+                    guard !text.isEmpty else { continue }
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: font,
+                        .foregroundColor: color,
+                    ]
+                    let size = text.size(withAttributes: attrs)
+                    cg.saveGState()
+                    textClip.clip()
+                    text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
+                              withAttributes: attrs)
+                    cg.restoreGState()
                 case .integer, .float:
                     let valid = type == .integer ? Int(text) != nil : Double(text) != nil
                     let attrs: [NSAttributedString.Key: Any] = [
@@ -685,6 +750,107 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             }
         }
         undoManager?.setActionName("Toggle Checkbox")
+        needsDisplay = true
+    }
+
+    // MARK: - Dropdowns (`select` / `multiselect` columns)
+
+    private func refreshSelectOptions(format: TSSFormat) {
+        var lists: [Int: [String]] = [:]
+        for (column, type) in format.columnTypes where type == .select || type == .multiselect {
+            guard let source = format.selectSources[column] else { continue }
+            lists[column] = optionsResolver.options(for: source, tsvURL: documentURLProvider?())
+        }
+        selectOptions = lists
+        selectOptionSets = lists.mapValues(Set.init)
+    }
+
+    /// The cells the type governs — same rows a boolean column gives a
+    /// checkbox: a plain data row with an ID, inside the data. nil elsewhere
+    /// (those cells show their text untouched, no chevron, no validation).
+    private func selectCellKind(at pos: GridPos) -> (options: [String], multi: Bool)? {
+        guard let model, let type = cachedTypes[pos.col],
+              type == .select || type == .multiselect,
+              pos.row < model.rowCount, pos.col < model.columnCount,
+              model.headerLevel(ofRow: pos.row) == 0, !model.isFieldNameRow(pos.row),
+              !model.value(row: pos.row, column: 0).isEmpty else { return nil }
+        return (selectOptions[pos.col] ?? [], type == .multiselect)
+    }
+
+    private func chevronRect(in cell: NSRect) -> NSRect {
+        let s = Metrics.chevronSize
+        return NSRect(x: cell.maxX - s - 6, y: (cell.midY - s / 2).rounded(),
+                      width: s, height: s)
+    }
+
+    /// The clickable strip at the right edge of a select cell, in on-screen
+    /// coordinates, or nil where there's no dropdown.
+    private func chevronHitRect(at pos: GridPos) -> NSRect? {
+        guard selectCellKind(at: pos) != nil else { return nil }
+        let cell = cellScreenRect(pos)
+        return NSRect(x: cell.maxX - Metrics.chevronHitWidth, y: cell.minY,
+                      width: Metrics.chevronHitWidth, height: cell.height)
+    }
+
+    private func drawDropdownChevron(in rect: NSRect) {
+        // Flipped view: maxY is the bottom, where the triangle points.
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: rect.minX, y: rect.minY + 2))
+        path.line(to: NSPoint(x: rect.maxX, y: rect.minY + 2))
+        path.line(to: NSPoint(x: rect.midX, y: rect.maxY - 1))
+        path.close()
+        NSColor.tertiaryLabelColor.setFill()
+        path.fill()
+    }
+
+    private func showSelectMenu(at pos: GridPos) {
+        guard let model, let kind = selectCellKind(at: pos) else { return }
+        let menu = NSMenu()
+        let current = Set(SelectCell.tokens(model.value(row: pos.row, column: pos.col)))
+
+        if !kind.multi {
+            let none = NSMenuItem(title: "None", action: #selector(pickSelectOption(_:)),
+                                  keyEquivalent: "")
+            none.target = self
+            none.representedObject = SelectPick(pos: pos, option: nil, multi: false)
+            if model.value(row: pos.row, column: pos.col).isEmpty { none.state = .on }
+            menu.addItem(none)
+            if !kind.options.isEmpty { menu.addItem(.separator()) }
+        }
+        for option in kind.options {
+            let item = NSMenuItem(title: option, action: #selector(pickSelectOption(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = SelectPick(pos: pos, option: option, multi: kind.multi)
+            if current.contains(option) { item.state = .on }
+            menu.addItem(item)
+        }
+        if menu.items.isEmpty {
+            let empty = NSMenuItem(title: "No Options Configured", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        }
+
+        let cell = cellScreenRect(pos)
+        menu.popUp(positioning: nil, at: NSPoint(x: cell.minX, y: cell.maxY), in: self)
+    }
+
+    @objc private func pickSelectOption(_ sender: NSMenuItem) {
+        guard let pick = sender.representedObject as? SelectPick, let model else { return }
+        if pick.multi, let option = pick.option {
+            // Picking toggles membership in the comma-separated list.
+            var tokens = SelectCell.tokens(model.value(row: pick.pos.row, column: pick.pos.col))
+                .filter { !$0.isEmpty }
+            if let existing = tokens.firstIndex(of: option) {
+                tokens.remove(at: existing)
+            } else {
+                tokens.append(option)
+            }
+            model.setValue(tokens.joined(separator: ","), row: pick.pos.row, column: pick.pos.col)
+        } else {
+            model.setValue(pick.option ?? "", row: pick.pos.row, column: pick.pos.col)
+        }
+        undoManager?.setActionName("Pick Option")
         needsDisplay = true
     }
 
@@ -1017,6 +1183,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if !shift, let box = checkboxHitRect(at: pos), box.contains(p) {
                 dragMode = .none
                 toggleCheckbox(at: pos)
+            } else if !shift, let zone = chevronHitRect(at: pos), zone.contains(p) {
+                // The chevron opens the option dropdown instead of an edit.
+                dragMode = .none
+                showSelectMenu(at: pos)
             } else if event.clickCount == 2 {
                 beginEditing(at: pos, initialText: nil)
             }
@@ -1171,6 +1341,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case .cell(let pos):
             if let box = checkboxHitRect(at: pos), box.contains(p) {
                 NSCursor.pointingHand.set()
+            } else if let zone = chevronHitRect(at: pos), zone.contains(p) {
+                NSCursor.pointingHand.set()
             } else {
                 NSCursor.arrow.set()
             }
@@ -1284,7 +1456,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     private func remapColumnFormatting(_ mapping: [Int: Int]) {
         guard !mapping.isEmpty, let format = formatProvider?(),
-              !(format.columnWidths.isEmpty && format.columnTypes.isEmpty) else { return }
+              !(format.columnWidths.isEmpty && format.columnTypes.isEmpty
+                && format.selectSources.isEmpty) else { return }
         onFormatChange? { format in
             var widths: [Int: CGFloat] = [:]
             for (k, v) in format.columnWidths { widths[mapping[k] ?? k] = v }
@@ -1292,6 +1465,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             var types: [Int: ColumnType] = [:]
             for (k, v) in format.columnTypes { types[mapping[k] ?? k] = v }
             format.columnTypes = types
+            var sources: [Int: SelectSource] = [:]
+            for (k, v) in format.selectSources { sources[mapping[k] ?? k] = v }
+            format.selectSources = sources
         }
         let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
         undoManager?.registerUndo(withTarget: self) { view in
@@ -1459,6 +1635,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         editor = field
         editingCell = pos
         editSessionFromTyping = (initialText != nil)
+        let selectKind = selectCellKind(at: pos)
+        editingSelectOptions = selectKind?.options
+        editingSelectIsMulti = selectKind?.multi ?? false
+        selectSuggestionBase = nil
+        // Type-to-edit should suggest from the very first character, so the
+        // pre-seeded text counts as "typed" rather than as already there.
+        lastEditorText = initialText != nil ? "" : field.stringValue
         window?.makeFirstResponder(field)
         if let fieldEditor = field.currentEditor() {
             fieldEditor.selectedRange = NSRange(location: field.stringValue.count, length: 0)
@@ -1484,6 +1667,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 }
             }
         }
+        // Setting stringValue never fires controlTextDidChange, so a typed-in
+        // first character needs its suggestion kicked off by hand.
+        if editSessionFromTyping, editingSelectOptions != nil {
+            autocompleteSelectEditor(field)
+        }
         needsDisplay = true
     }
 
@@ -1495,6 +1683,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let text = sanitize(field.stringValue)
         editor = nil
         editingCell = nil
+        editingSelectOptions = nil
+        selectSuggestionBase = nil
         field.removeFromSuperview()
         model?.setValue(text, row: cell.row, column: cell.col)
         isCommittingEdit = false
@@ -1512,6 +1702,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard let field = editor else { return }
         editor = nil
         editingCell = nil
+        editingSelectOptions = nil
+        selectSuggestionBase = nil
         field.removeFromSuperview()
         window?.makeFirstResponder(self)
         needsDisplay = true
@@ -1561,6 +1753,83 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     func controlTextDidEndEditing(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, field === editor else { return }
         commitEdit(thenMove: nil)
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField, field === editor else { return }
+        autocompleteSelectEditor(field)
+    }
+
+    /// Inline autocomplete for select cells: the first option the token being
+    /// typed is a prefix of is filled in ahead of the cursor, with the
+    /// unconfirmed remainder selected — typing keeps narrowing it, ⌫ discards
+    /// it, and committing the edit accepts it. On a multi-select the token is
+    /// whatever follows the last comma, and typing "," confirms the suggestion
+    /// (or expands a bare prefix) before starting the next token.
+    private func autocompleteSelectEditor(_ field: NSTextField) {
+        guard let options = editingSelectOptions, !options.isEmpty, !isAutocompleting,
+              let textView = field.currentEditor() as? NSTextView else { return }
+        let text = textView.string
+        // What the user had really typed before this change: a showing
+        // suggestion isn't part of it (typing replaces its selected remainder).
+        let previous = selectSuggestionBase ?? lastEditorText
+        lastEditorText = text
+        selectSuggestionBase = nil
+
+        func setText(_ newText: String, selecting range: NSRange) {
+            isAutocompleting = true
+            field.stringValue = newText
+            textView.setSelectedRange(range)
+            lastEditorText = newText
+            isAutocompleting = false
+        }
+
+        // Comma on a multi-select confirms the token it closes: a bare prefix
+        // ("fir,") becomes the option it was heading for ("fire,").
+        if editingSelectIsMulti, text == previous + "," {
+            let head = previous as NSString
+            var start = 0
+            let priorComma = head.range(of: ",", options: .backwards)
+            if priorComma.location != NSNotFound { start = priorComma.location + 1 }
+            let token = head.substring(from: start).trimmingCharacters(in: .whitespaces)
+            guard !token.isEmpty, !options.contains(token),
+                  let match = options.first(where: {
+                      $0.lowercased().hasPrefix(token.lowercased())
+                  }) else { return }
+            let confirmed = head.substring(to: start) + match + ","
+            setText(confirmed, selecting: NSRange(location: (confirmed as NSString).length,
+                                                  length: 0))
+            return
+        }
+
+        // Suggest only while typing forward at the end of the text — deleting
+        // or editing the middle should never fight the user.
+        guard text.count > previous.count,
+              textView.selectedRange.length == 0,
+              textView.selectedRange.location == (text as NSString).length else { return }
+
+        let ns = text as NSString
+        var tokenStart = 0
+        if editingSelectIsMulti {
+            let lastComma = ns.range(of: ",", options: .backwards)
+            if lastComma.location != NSNotFound { tokenStart = lastComma.location + 1 }
+        }
+        let typed = ns.substring(from: tokenStart)
+        let token = typed.trimmingCharacters(in: .whitespaces)
+        guard !token.isEmpty, !options.contains(token),
+              let match = options.first(where: {
+                  $0.lowercased().hasPrefix(token.lowercased())
+              }) else { return }
+
+        // Replace the token with the match (fixing its case), keep the typed
+        // part before the cursor and the rest selected as the suggestion.
+        let prefix = ns.substring(to: tokenStart) + typed.prefix(while: { $0 == " " })
+        let completed = prefix + match
+        let cursor = (prefix as NSString).length + (token as NSString).length
+        setText(completed, selecting: NSRange(
+            location: cursor,
+            length: (completed as NSString).length - cursor))
+        selectSuggestionBase = prefix + token
     }
 
     // MARK: - Clipboard & selection commands
@@ -1755,7 +2024,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// deleted column is dropped.
     private func shiftColumnFormatting(_ transform: (Int) -> Int?) {
         guard let format = formatProvider?(),
-              !format.columnWidths.isEmpty || !format.columnTypes.isEmpty else { return }
+              !format.columnWidths.isEmpty || !format.columnTypes.isEmpty
+                || !format.selectSources.isEmpty else { return }
         var widths: [Int: CGFloat] = [:]
         for (column, width) in format.columnWidths {
             if let moved = transform(column) { widths[moved] = width }
@@ -1764,21 +2034,30 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         for (column, type) in format.columnTypes {
             if let moved = transform(column) { types[moved] = type }
         }
-        setColumnFormatting(widths: widths, types: types)
+        var sources: [Int: SelectSource] = [:]
+        for (column, source) in format.selectSources {
+            if let moved = transform(column) { sources[moved] = source }
+        }
+        setColumnFormatting(widths: widths, types: types, sources: sources)
     }
 
     /// The per-column counterpart of `setRowFormatting`.
-    private func setColumnFormatting(widths: [Int: CGFloat], types: [Int: ColumnType]) {
+    private func setColumnFormatting(widths: [Int: CGFloat], types: [Int: ColumnType],
+                                     sources: [Int: SelectSource]) {
         guard let format = formatProvider?() else { return }
         let previousWidths = format.columnWidths
         let previousTypes = format.columnTypes
-        guard widths != previousWidths || types != previousTypes else { return }
+        let previousSources = format.selectSources
+        guard widths != previousWidths || types != previousTypes
+            || sources != previousSources else { return }
         onFormatChange? {
             $0.columnWidths = widths
             $0.columnTypes = types
+            $0.selectSources = sources
         }
         undoManager?.registerUndo(withTarget: self) { view in
-            view.setColumnFormatting(widths: previousWidths, types: previousTypes)
+            view.setColumnFormatting(widths: previousWidths, types: previousTypes,
+                                     sources: previousSources)
         }
         modelDidChange()
     }
@@ -1853,6 +2132,42 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 } else {
                     format.columnTypes[c] = type
                 }
+                // None of these types has an options source; picking one
+                // retires whatever a select column had configured.
+                format.selectSources.removeValue(forKey: c)
+            }
+        }
+        modelDidChange()
+    }
+
+    /// "Select…" / "Multi-Select…": these types carry an options source, so
+    /// they're set through a dialog — where the options come from (an ad-hoc
+    /// list, or another sheet's IDs) — instead of a bare menu pick. Re-picking
+    /// the type re-opens the dialog prefilled, to edit the source.
+    @objc private func configureSelectColumns(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let type = ColumnType(rawValue: raw), let model else { return }
+        let columns = selectedCols.filter { $0 < model.columnCount }
+        guard let anchorColumn = columns.first else { return }
+
+        // Name the column by its field name when there is one, else by letter.
+        var columnName = "Column " + Self.columnLetters(anchorColumn)
+        if model.hasFieldNameRow {
+            let fieldName = model.value(row: 0, column: anchorColumn)
+            if !fieldName.isEmpty { columnName = "“\(fieldName)”" }
+        }
+        if columns.count > 1 { columnName += " (and \(columns.count - 1) more)" }
+
+        guard let source = SelectSourcePanel.run(
+            columnName: columnName,
+            typeTitle: type == .multiselect ? "Multi-Select" : "Select",
+            existing: cachedSelectSources[anchorColumn],
+            tsvURL: documentURLProvider?()) else { return }
+
+        onFormatChange? { format in
+            for c in columns {
+                format.columnTypes[c] = type
+                format.selectSources[c] = source
             }
         }
         modelDidChange()
@@ -1883,6 +2198,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     let text = model.value(row: r, column: c)
                     let w = (text as NSString).size(withAttributes: [.font: cellFont(forRow: r, column: c)]).width
                     maxWidth = max(maxWidth, w + 14)
+                }
+                // Select cells clip their text short of the dropdown chevron.
+                if let type = format.columnTypes[c], type == .select || type == .multiselect {
+                    maxWidth += Metrics.chevronHitWidth
                 }
                 format.columnWidths[c] = min(maxWidth.rounded(.up), 800)
             }
@@ -2112,6 +2431,19 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 else if selectedTypes.contains(type) { item.state = .mixed }
                 typeMenu.addItem(item)
             }
+            // Select types need an options source, so they run through a
+            // configuration dialog (re-picking one edits its source).
+            typeMenu.addItem(.separator())
+            for (title, type) in [("Select…", ColumnType.select),
+                                  ("Multi-Select…", .multiselect)] {
+                let item = NSMenuItem(title: title, action: #selector(configureSelectColumns(_:)),
+                                      keyEquivalent: "")
+                item.target = self
+                item.representedObject = type.rawValue
+                if selectedTypes == [type] { item.state = .on }
+                else if selectedTypes.contains(type) { item.state = .mixed }
+                typeMenu.addItem(item)
+            }
             let plural = selectedCols.count > 1
             let typeItem = NSMenuItem(title: plural ? "Column Data Types" : "Column Data Type",
                                       action: nil, keyEquivalent: "")
@@ -2188,6 +2520,20 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         default:
             return true
         }
+    }
+}
+
+/// Payload for a select dropdown's menu items. A nil option is the
+/// single-select "None" (clear the cell).
+private final class SelectPick: NSObject {
+    let pos: GridPos
+    let option: String?
+    let multi: Bool
+
+    init(pos: GridPos, option: String?, multi: Bool) {
+        self.pos = pos
+        self.option = option
+        self.multi = multi
     }
 }
 

@@ -13,6 +13,8 @@ import Foundation
 ///     colwidth	<columnIndex>	<points>
 ///     rowheight	<rowIndex>	<points>
 ///     collapsed	<headerRowIndex>	1
+///     selectlist	<columnIndex>	<option>	<option>	…
+///     selectfile	<columnIndex>	<relative path to .tsv>
 ///
 /// TODO(tss): cell styles (font/color/alignment), merged headers, calculated
 /// columns. Add new record types here; unknown records are preserved verbatim.
@@ -23,6 +25,16 @@ enum ColumnType: String {
     case float
     case text
     case boolean
+    case select
+    case multiselect
+}
+
+/// Where a `select` / `multiselect` column's allowed options come from: an
+/// ad-hoc list defined right in the sidecar, or another sheet's IDs — named by
+/// a path relative to this file, so the sheets can move around together.
+enum SelectSource: Equatable {
+    case list([String])
+    case file(String)
 }
 
 /// What a `boolean` cell holds. The file only ever carries `TRUE`/`FALSE` —
@@ -45,11 +57,35 @@ enum BooleanCell {
     static func literal(_ on: Bool) -> String { on ? "TRUE" : "FALSE" }
 }
 
+/// What a `select` / `multiselect` cell holds: one option, or a
+/// comma-separated list of them. Empty is always allowed. Anything else is
+/// data the column type doesn't describe — flagged, never rewritten.
+enum SelectCell {
+
+    /// The comma-separated entries of a cell, whitespace-trimmed. A
+    /// single-select cell is just the one-entry case.
+    static func tokens(_ raw: String) -> [String] {
+        guard !raw.isEmpty else { return [] }
+        return raw.components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    static func isValid(_ raw: String, options: Set<String>, multi: Bool) -> Bool {
+        let entries = tokens(raw)
+        if entries.isEmpty { return true }
+        if !multi && entries.count > 1 { return false }
+        return entries.allSatisfy { !$0.isEmpty && options.contains($0) }
+    }
+}
+
 struct TSSFormat {
 
     var columnWidths: [Int: CGFloat] = [:]
     var rowHeights: [Int: CGFloat] = [:]
     var columnTypes: [Int: ColumnType] = [:]
+
+    /// Option sources for `select` / `multiselect` columns.
+    var selectSources: [Int: SelectSource] = [:]
 
     /// Header rows whose sections are collapsed. Entries for rows that are no
     /// longer headers are inert (and pruned on the next toggle), so an edited-
@@ -65,7 +101,7 @@ struct TSSFormat {
 
     var hasCustomFormatting: Bool {
         !columnWidths.isEmpty || !rowHeights.isEmpty || !columnTypes.isEmpty
-            || !collapsedSections.isEmpty
+            || !selectSources.isEmpty || !collapsedSections.isEmpty
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
 
@@ -103,6 +139,16 @@ struct TSSFormat {
                 if let index = Int(fields[1]), let type = ColumnType(rawValue: fields[2]), type != .raw {
                     format.columnTypes[index] = type
                 }
+            // Options are tab-separated: cell values can never contain a tab,
+            // so any option is representable, commas included.
+            case "selectlist" where fields.count >= 2:
+                if let index = Int(fields[1]) {
+                    format.selectSources[index] = .list(fields.dropFirst(2).filter { !$0.isEmpty })
+                }
+            case "selectfile" where fields.count >= 3:
+                if let index = Int(fields[1]), !fields[2].isEmpty {
+                    format.selectSources[index] = .file(fields[2])
+                }
             case "collapsed" where fields.count >= 3:
                 if let index = Int(fields[1]), index >= 0, fields[2] != "0" {
                     format.collapsedSections.insert(index)
@@ -132,6 +178,14 @@ struct TSSFormat {
         }
         for (index, type) in columnTypes.sorted(by: { $0.key < $1.key }) where type != .raw {
             lines.append("coltype\t\(index)\t\(type.rawValue)")
+        }
+        for (index, source) in selectSources.sorted(by: { $0.key < $1.key }) {
+            switch source {
+            case .list(let options):
+                lines.append((["selectlist", String(index)] + options).joined(separator: "\t"))
+            case .file(let path):
+                lines.append("selectfile\t\(index)\t\(path)")
+            }
         }
         for index in collapsedSections.sorted() {
             lines.append("collapsed\t\(index)\t1")

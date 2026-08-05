@@ -255,6 +255,21 @@ final class SpreadsheetModelTests: XCTestCase {
         XCTAssertEqual(model.value(row: 0, column: 1), "")
     }
 
+    // MARK: - Entry IDs (select-column options)
+
+    func testEntryIDsSkipNonEntriesAndDeduplicate() {
+        let model = makeModel("""
+        ID\tName
+        # Section\t
+        fire\tFire
+        water\tWater
+        ### comment\t
+        \tno id
+        fire\tFire again
+        """)
+        XCTAssertEqual(model.entryIDs(), ["fire", "water"])
+    }
+
     // MARK: - Selection tally
 
     /// Row 0 is the field-name row, row 2 a header, row 5 a "###" comment and
@@ -318,5 +333,107 @@ final class TSSFormatTests: XCTestCase {
     func testMalformedRecordsAreTolerated() {
         let format = TSSFormat.parse("colwidth\tnot-a-number\t99\ncolwidth\t1\t-5\ncolwidth\t1\n")
         XCTAssertTrue(format.columnWidths.isEmpty)
+    }
+
+    func testSelectRecordsRoundTrip() {
+        let text = "coltype\t2\tselect\nselectlist\t2\tred fox\tgreen\tblue, dotted\n"
+            + "coltype\t3\tmultiselect\nselectfile\t3\t../shared/enemies.tsv\n"
+        let format = TSSFormat.parse(text)
+        XCTAssertEqual(format.columnTypes[2], .select)
+        XCTAssertEqual(format.columnTypes[3], .multiselect)
+        // Options are tab-separated, so spaces and commas survive.
+        XCTAssertEqual(format.selectSources[2], .list(["red fox", "green", "blue, dotted"]))
+        XCTAssertEqual(format.selectSources[3], .file("../shared/enemies.tsv"))
+
+        let out = format.serialize()
+        XCTAssertTrue(out.contains("coltype\t2\tselect\n"))
+        XCTAssertTrue(out.contains("selectlist\t2\tred fox\tgreen\tblue, dotted"))
+        XCTAssertTrue(out.contains("selectfile\t3\t../shared/enemies.tsv"))
+        XCTAssertTrue(format.hasCustomFormatting)
+    }
+}
+
+final class SelectCellTests: XCTestCase {
+
+    private let options: Set<String> = ["fire", "water", "earth"]
+
+    func testTokensSplitOnCommasAndTrim() {
+        XCTAssertEqual(SelectCell.tokens(""), [])
+        XCTAssertEqual(SelectCell.tokens("fire"), ["fire"])
+        XCTAssertEqual(SelectCell.tokens("fire, water"), ["fire", "water"])
+        XCTAssertEqual(SelectCell.tokens("a,,b"), ["a", "", "b"])
+    }
+
+    func testSingleSelectValidation() {
+        XCTAssertTrue(SelectCell.isValid("", options: options, multi: false))
+        XCTAssertTrue(SelectCell.isValid("fire", options: options, multi: false))
+        XCTAssertTrue(SelectCell.isValid(" fire ", options: options, multi: false))
+        XCTAssertFalse(SelectCell.isValid("lava", options: options, multi: false))
+        // A comma-separated list is multi-select data, not a single option.
+        XCTAssertFalse(SelectCell.isValid("fire,water", options: options, multi: false))
+        XCTAssertFalse(SelectCell.isValid("Fire", options: options, multi: false))
+    }
+
+    func testMultiSelectValidation() {
+        XCTAssertTrue(SelectCell.isValid("", options: options, multi: true))
+        XCTAssertTrue(SelectCell.isValid("fire", options: options, multi: true))
+        XCTAssertTrue(SelectCell.isValid("fire,water", options: options, multi: true))
+        XCTAssertTrue(SelectCell.isValid("fire, water", options: options, multi: true))
+        XCTAssertFalse(SelectCell.isValid("fire,lava", options: options, multi: true))
+        // Dangling and doubled commas are empty tokens — flagged, not hidden.
+        XCTAssertFalse(SelectCell.isValid("fire,", options: options, multi: true))
+        XCTAssertFalse(SelectCell.isValid("fire,,water", options: options, multi: true))
+    }
+}
+
+final class SelectOptionsResolverTests: XCTestCase {
+
+    func testResolveRelativeAndAbsolutePaths() {
+        let base = URL(fileURLWithPath: "/data/sheets/heroes.tsv")
+        XCTAssertEqual(SelectOptionsResolver.resolve("enemies.tsv", relativeTo: base)?.path,
+                       "/data/sheets/enemies.tsv")
+        XCTAssertEqual(SelectOptionsResolver.resolve("../shared/items.tsv", relativeTo: base)?.path,
+                       "/data/shared/items.tsv")
+        XCTAssertEqual(SelectOptionsResolver.resolve("/abs/items.tsv", relativeTo: base)?.path,
+                       "/abs/items.tsv")
+        // A never-saved sheet has no base to resolve a relative path against.
+        XCTAssertNil(SelectOptionsResolver.resolve("enemies.tsv", relativeTo: nil))
+        XCTAssertEqual(SelectOptionsResolver.resolve("/abs/items.tsv", relativeTo: nil)?.path,
+                       "/abs/items.tsv")
+    }
+
+    func testStorablePathPrefersRelative() {
+        let base = URL(fileURLWithPath: "/data/sheets/heroes.tsv")
+        XCTAssertEqual(SelectOptionsResolver.storablePath(
+            to: URL(fileURLWithPath: "/data/sheets/enemies.tsv"), from: base),
+            "enemies.tsv")
+        XCTAssertEqual(SelectOptionsResolver.storablePath(
+            to: URL(fileURLWithPath: "/data/shared/items.tsv"), from: base),
+            "../shared/items.tsv")
+        // Self-reference: the sheet using its own IDs stores its own name.
+        XCTAssertEqual(SelectOptionsResolver.storablePath(
+            to: URL(fileURLWithPath: "/data/sheets/heroes.tsv"), from: base),
+            "heroes.tsv")
+        XCTAssertEqual(SelectOptionsResolver.storablePath(
+            to: URL(fileURLWithPath: "/data/sheets/items.tsv"), from: nil),
+            "/data/sheets/items.tsv")
+    }
+
+    func testFileSourceReadsIDsFromDisk() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsvee-select-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let enemies = dir.appendingPathComponent("enemies.tsv")
+        try "ID\tName\n# Bosses\t\nslime\tSlime\nbat\tBat\n\tno id\n"
+            .write(to: enemies, atomically: true, encoding: .utf8)
+        let heroes = dir.appendingPathComponent("heroes.tsv")
+
+        let resolver = SelectOptionsResolver()
+        XCTAssertEqual(resolver.options(for: .file("enemies.tsv"), tsvURL: heroes),
+                       ["slime", "bat"])
+        XCTAssertEqual(resolver.options(for: .file("missing.tsv"), tsvURL: heroes), [])
+        XCTAssertEqual(resolver.options(for: .list(["a", "b"]), tsvURL: nil), ["a", "b"])
     }
 }

@@ -118,6 +118,19 @@ Right-click a column (header or any cell) → **Column Data Type**:
   toggle — space toggles the whole selection at once. Values that aren't
   `TRUE`/`FALSE` are shown in red rather than coerced, and lines with no ID
   get no checkbox.
+- **Select / Multi-Select** — the cell must be empty or hold a pre-defined
+  option (Multi-Select allows a comma-separated list of them). Picking the
+  type opens a dialog for where the options come from: an **ad-hoc list** you
+  type in, or **the IDs of another sheet** — any open sheet (including this
+  one) or a file you navigate to, stored as a relative path so the sheets can
+  move together. If the option sheet is open its live IDs are used; otherwise
+  it's read from disk. Like Boolean, the type only governs rows with IDs:
+  every such cell gets a **dropdown chevron** (click to pick; on a
+  multi-select, picks toggle membership), typing gets **inline autocomplete**
+  (the suggested completion appears selected ahead of the cursor — keep
+  typing to narrow it, ⌫ to reject it, commit to accept it), and on a
+  multi-select **comma confirms the suggestion** and starts the next option.
+  Values the options don't cover are shown in red, never rewritten.
 
 Types are per-column formatting, stored in the `.tss` sidecar, and they
 follow their column when you drag-reorder. Header (`#`) rows and the
@@ -158,10 +171,17 @@ v0 wire format — one tab-separated record per line:
 tss	0
 colwidth	<columnIndex>	<points>
 rowheight	<rowIndex>	<points>
-coltype	<columnIndex>	raw|integer|float|text|boolean
+coltype	<columnIndex>	raw|integer|float|text|boolean|select|multiselect
 collapsed	<headerRowIndex>	1
 freeze	fieldrow|idcol	0|1
+selectlist	<columnIndex>	<option>	<option>	…
+selectfile	<columnIndex>	<relative path to .tsv>
 ```
+
+`select`/`multiselect` columns carry one extra record naming their options
+source: `selectlist` holds an ad-hoc option list (tab-separated, so any cell
+value is representable), `selectfile` points at the sheet whose IDs are the
+options, by a path relative to this file.
 
 The UI writes column widths (drag-resize a column), column types, collapsed
 sections and the freeze toggles today; freeze records are only written when a
