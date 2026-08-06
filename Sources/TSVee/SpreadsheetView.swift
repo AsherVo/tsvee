@@ -55,6 +55,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         /// at the cell's right edge that opens the menu.
         static let chevronSize: CGFloat = 8
         static let chevronHitWidth: CGFloat = 20
+        /// The "columns are folded away here" marker in the letter band: a
+        /// button-sized target sitting just clear of the seam, so grabbing the
+        /// seam still resizes the column to its left.
+        static let hiddenMarkerWidth: CGFloat = 13
+        static let hiddenMarkerInset: CGFloat = resizeGrabMargin + 1
     }
 
     private enum Palette {
@@ -137,6 +142,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// Collapsed header row → the last row it folds away. Derived alongside
     /// `hiddenRows`, and what lets a selection reach into a fold at its end.
     private var foldEnds: [Int: Int] = [:]
+
+    /// Columns hidden by the user (mirrors the `.tss` set). Like hidden rows
+    /// these are zero-sized rather than skipped, so geometry, drawing and hit
+    /// testing need no separate notion of "the nth visible column". The gap in
+    /// the header letters is the cue that something is folded away, along with
+    /// the marker drawn at the seam.
+    private var hiddenColumns: Set<Int> = []
 
     private var anchor = GridPos(row: 0, col: 0)
     private var focus = GridPos(row: 0, col: 0)
@@ -238,7 +250,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     // MARK: - Geometry
 
     private func width(ofColumn c: Int) -> CGFloat {
-        cachedWidths[c] ?? (c == 0 ? Metrics.idColWidth : Metrics.defaultColWidth)
+        if hiddenColumns.contains(c) { return 0 }
+        return cachedWidths[c] ?? (c == 0 ? Metrics.idColWidth : Metrics.defaultColWidth)
     }
 
     private func height(ofRow r: Int) -> CGFloat {
@@ -296,6 +309,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         gridRows = model.rowCount + Metrics.phantomRows
         gridCols = model.columnCount + Metrics.phantomCols
         collapsedRows = format.collapsedSections
+        // Column 0 and the phantom columns are never hideable, whatever a
+        // hand-edited sidecar says.
+        hiddenColumns = format.hiddenColumns.filter { $0 >= 1 && $0 < model.columnCount }
         recomputeHiddenRows(model: model)
         clampSelection()
         rebuildOffsets()
@@ -375,9 +391,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         focus.col = min(max(focus.col, 0), gridCols - 1)
         // A selection endpoint inside a freshly collapsed section would be a
         // zero-height sliver you could still type into; pull it up to the
-        // header that swallowed it.
+        // header that swallowed it. Hidden columns are the same story sideways.
         anchor.row = visibleRow(from: anchor.row, searching: -1)
         focus.row = visibleRow(from: focus.row, searching: -1)
+        anchor.col = visibleColumn(from: anchor.col, searching: -1)
+        focus.col = visibleColumn(from: focus.col, searching: -1)
     }
 
     /// Nearest unfolded row starting at `row` and walking by `step`, falling
@@ -388,6 +406,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         while hiddenRows.contains(r), r + step >= 0, r + step < gridRows { r += step }
         while hiddenRows.contains(r), r - step >= 0, r - step < gridRows { r -= step }
         return r
+    }
+
+    /// The column counterpart of `visibleRow`. Column 0 is never hideable, so
+    /// walking left always finds somewhere to land.
+    private func visibleColumn(from col: Int, searching step: Int) -> Int {
+        var c = min(max(col, 0), gridCols - 1)
+        while hiddenColumns.contains(c), c + step >= 0, c + step < gridCols { c += step }
+        while hiddenColumns.contains(c), c - step >= 0, c - step < gridCols { c -= step }
+        return c
     }
 
     /// Nudges a row insertion boundary past any folded section it falls inside,
@@ -546,7 +573,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             // Header and field-name rows ignore column types entirely.
             let plainRow = model.headerLevel(ofRow: r) == 0 && !model.isFieldNameRow(r)
             let rowColor = textColor(forRow: r)
-            for c in cols {
+            for c in cols where !hiddenColumns.contains(c) {
                 guard c < model.columnCount else { break }
                 let text = model.value(row: r, column: c)
                 if editingCell == GridPos(row: r, col: c) { continue }
@@ -893,6 +920,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let numberFont = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .regular)
 
         func drawLetter(_ c: Int, translateX: CGFloat) {
+            guard !hiddenColumns.contains(c) else { return }
             let rect = NSRect(x: xOffsets[c] + translateX, y: vis.minY,
                               width: xOffsets[c + 1] - xOffsets[c], height: headerH)
             if selectedCols.contains(c) {
@@ -944,6 +972,19 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
         for c in 0..<frozenColCount { drawLetter(c, translateX: vis.minX) }
 
+        // Markers where columns are folded away. Clipped to the body band, so
+        // one can't creep over the frozen pane or the corner box.
+        if !hiddenColumns.isEmpty {
+            cg.saveGState()
+            cg.clip(to: NSRect(x: vis.minX + chromeLeft, y: vis.minY,
+                               width: vis.width - chromeLeft, height: headerH))
+            for run in hiddenColumnRuns {
+                guard let marker = hiddenMarkerScreenRect(for: run, vis: vis) else { continue }
+                drawHiddenColumnsMarker(in: marker)
+            }
+            cg.restoreGState()
+        }
+
         // Row number strip.
         Palette.chromeBackground.setFill()
         NSRect(x: vis.minX, y: vis.minY + headerH, width: headerW, height: vis.height - headerH).fill()
@@ -992,6 +1033,27 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
         path.close()
         (collapsed ? NSColor.controlAccentColor : Palette.chromeText).setFill()
+        path.fill()
+    }
+
+    /// The marker for a run of hidden columns: two arrowheads pointing apart,
+    /// where the columns would be. Clicking it brings them back — the missing
+    /// letters (C, then E) are the other half of the cue.
+    private func drawHiddenColumnsMarker(in box: NSRect) {
+        Palette.badgeFill.setFill()
+        NSBezierPath(roundedRect: box, xRadius: 2.5, yRadius: 2.5).fill()
+        let size: CGFloat = 3.5
+        let gap: CGFloat = 1.5
+        let path = NSBezierPath()
+        path.move(to: NSPoint(x: box.midX - gap - size, y: box.midY))
+        path.line(to: NSPoint(x: box.midX - gap, y: box.midY - size))
+        path.line(to: NSPoint(x: box.midX - gap, y: box.midY + size))
+        path.close()
+        path.move(to: NSPoint(x: box.midX + gap + size, y: box.midY))
+        path.line(to: NSPoint(x: box.midX + gap, y: box.midY - size))
+        path.line(to: NSPoint(x: box.midX + gap, y: box.midY + size))
+        path.close()
+        NSColor.controlAccentColor.setFill()
         path.fill()
     }
 
@@ -1054,9 +1116,36 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private enum HitArea {
         case corner
         case columnHeader(col: Int, resizeEdgeOf: Int?)
+        case hiddenColumnsMarker(ClosedRange<Int>)
         case rowHeader(row: Int)
         case sectionToggle(row: Int)
         case cell(GridPos)
+    }
+
+    /// Hidden columns grouped into the contiguous runs they were folded into,
+    /// left to right — one marker, and one "show these" click, per gap.
+    private var hiddenColumnRuns: [ClosedRange<Int>] {
+        var runs: [ClosedRange<Int>] = []
+        for c in hiddenColumns.sorted() {
+            if let last = runs.last, last.upperBound + 1 == c {
+                runs[runs.count - 1] = last.lowerBound...c
+            } else {
+                runs.append(c...c)
+            }
+        }
+        return runs
+    }
+
+    /// On-screen box for a run's marker, inside the header of the column that
+    /// follows the gap. nil when that column is frozen (the marker would ride
+    /// the sticky pane and cover its letter).
+    private func hiddenMarkerScreenRect(for run: ClosedRange<Int>, vis: NSRect) -> NSRect? {
+        let following = run.upperBound + 1
+        guard following < gridCols, following >= frozenColCount else { return nil }
+        return NSRect(x: xOffsets[run.lowerBound] + Metrics.hiddenMarkerInset,
+                      y: vis.minY + 5,
+                      width: Metrics.hiddenMarkerWidth,
+                      height: Metrics.colHeaderHeight - 10)
     }
 
     /// Column at an on-screen x, honoring the sticky frozen column.
@@ -1064,7 +1153,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if frozenColCount > 0, x < vis.minX + chromeLeft {
             return colAt(min(max(x - vis.minX, xOffsets[0]), chromeLeft - 0.5))
         }
-        return colAt(x)
+        // Hidden columns share their successor's offset, so — as with folded
+        // rows — the search only needs help at the clamped past-the-end edge.
+        return visibleColumn(from: colAt(x), searching: -1)
     }
 
     /// Row at an on-screen y, honoring the sticky frozen row.
@@ -1087,13 +1178,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     return .columnHeader(col: c, resizeEdgeOf: c)
                 }
             }
+            for run in hiddenColumnRuns {
+                if let marker = hiddenMarkerScreenRect(for: run, vis: vis), marker.contains(p) {
+                    return .hiddenColumnsMarker(run)
+                }
+            }
             let c = columnAtScreenX(p.x, vis: vis)
             if c >= frozenColCount {
                 if abs(p.x - xOffsets[c + 1]) <= Metrics.resizeGrabMargin {
                     return .columnHeader(col: c, resizeEdgeOf: c)
                 }
+                // The left edge belongs to the column before — the nearest
+                // *visible* one, since a hidden neighbour has no width to drag.
                 if c > frozenColCount, abs(p.x - xOffsets[c]) <= Metrics.resizeGrabMargin {
-                    return .columnHeader(col: c, resizeEdgeOf: c - 1)
+                    return .columnHeader(col: c,
+                                         resizeEdgeOf: visibleColumn(from: c - 1, searching: -1))
                 }
             }
             return .columnHeader(col: c, resizeEdgeOf: nil)
@@ -1152,6 +1251,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 selectColumn(c, extend: shift)
                 dragMode = .selectColumns
             }
+
+        case .hiddenColumnsMarker(let run):
+            setColumns(Array(run), hidden: false)
 
         case .sectionToggle(let r):
             // ⌥-click folds/unfolds the subsections along with the section.
@@ -1336,7 +1438,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             } else {
                 NSCursor.arrow.set()
             }
-        case .sectionToggle:
+        case .sectionToggle, .hiddenColumnsMarker:
             NSCursor.pointingHand.set()
         case .cell(let pos):
             if let box = checkboxHitRect(at: pos), box.contains(p) {
@@ -1457,7 +1559,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func remapColumnFormatting(_ mapping: [Int: Int]) {
         guard !mapping.isEmpty, let format = formatProvider?(),
               !(format.columnWidths.isEmpty && format.columnTypes.isEmpty
-                && format.selectSources.isEmpty) else { return }
+                && format.selectSources.isEmpty && format.hiddenColumns.isEmpty) else { return }
         onFormatChange? { format in
             var widths: [Int: CGFloat] = [:]
             for (k, v) in format.columnWidths { widths[mapping[k] ?? k] = v }
@@ -1468,6 +1570,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             var sources: [Int: SelectSource] = [:]
             for (k, v) in format.selectSources { sources[mapping[k] ?? k] = v }
             format.selectSources = sources
+            format.hiddenColumns = Set(format.hiddenColumns.map { mapping[$0] ?? $0 })
         }
         let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
         undoManager?.registerUndo(withTarget: self) { view in
@@ -1542,6 +1645,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             target.row = visibleRow(from: target.row, searching: dRow > 0 ? 1 : -1)
         }
         target.col = min(max(target.col + dCol, 0), gridCols - 1)
+        // Likewise sideways: hidden columns are stepped over, not into.
+        if dCol != 0 {
+            target.col = visibleColumn(from: target.col, searching: dCol > 0 ? 1 : -1)
+        }
         focus = target
         if !extend { anchor = target }
         scrollCellToVisible(target)
@@ -1977,6 +2084,49 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         applySectionCollapse(rows: Array(collapsedRows), collapsed: false)
     }
 
+    // MARK: - Hiding columns
+
+    /// The selected columns that can actually be folded away: real data
+    /// columns that aren't already hidden, never the ID column (it anchors
+    /// every row) and never the phantom space past the data.
+    private var hideableSelectedColumns: [Int] {
+        guard let model else { return [] }
+        return selectedCols.filter {
+            $0 >= 1 && $0 < model.columnCount && !hiddenColumns.contains($0)
+        }
+    }
+
+    /// Hidden columns the selection reaches over. Selecting across a gap picks
+    /// up the columns inside it, which is how a hidden run gets chosen without
+    /// being clickable itself.
+    private var hiddenColumnsInSelection: [Int] {
+        selectedCols.filter { hiddenColumns.contains($0) }
+    }
+
+    @objc func hideSelectedColumns(_ sender: Any?) {
+        setColumns(hideableSelectedColumns, hidden: true)
+    }
+
+    @objc func showHiddenColumns(_ sender: Any?) {
+        setColumns(hiddenColumnsInSelection, hidden: false)
+    }
+
+    @objc func showAllHiddenColumns(_ sender: Any?) {
+        setColumns(Array(hiddenColumns), hidden: false)
+    }
+
+    private func setColumns(_ columns: [Int], hidden: Bool) {
+        guard !columns.isEmpty else { return }
+        var updated = hiddenColumns
+        if hidden { updated.formUnion(columns) } else { updated.subtract(columns) }
+        guard updated != hiddenColumns else { return }
+        onFormatChange? { $0.hiddenColumns = updated }
+        // A selection sitting on the columns just hidden is pulled to the
+        // nearest visible one by `clampSelection`.
+        modelDidChange()
+        selectionDidChange()
+    }
+
     // MARK: - Row / column commands (Sheet menu + context menu)
 
     /// Insert / delete work in units of the selection: three selected rows
@@ -2032,7 +2182,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func shiftColumnFormatting(_ transform: (Int) -> Int?) {
         guard let format = formatProvider?(),
               !format.columnWidths.isEmpty || !format.columnTypes.isEmpty
-                || !format.selectSources.isEmpty else { return }
+                || !format.selectSources.isEmpty || !format.hiddenColumns.isEmpty else { return }
         var widths: [Int: CGFloat] = [:]
         for (column, width) in format.columnWidths {
             if let moved = transform(column) { widths[moved] = width }
@@ -2045,26 +2195,29 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         for (column, source) in format.selectSources {
             if let moved = transform(column) { sources[moved] = source }
         }
-        setColumnFormatting(widths: widths, types: types, sources: sources)
+        setColumnFormatting(widths: widths, types: types, sources: sources,
+                            hidden: Set(format.hiddenColumns.compactMap(transform)))
     }
 
     /// The per-column counterpart of `setRowFormatting`.
     private func setColumnFormatting(widths: [Int: CGFloat], types: [Int: ColumnType],
-                                     sources: [Int: SelectSource]) {
+                                     sources: [Int: SelectSource], hidden: Set<Int>) {
         guard let format = formatProvider?() else { return }
         let previousWidths = format.columnWidths
         let previousTypes = format.columnTypes
         let previousSources = format.selectSources
+        let previousHidden = format.hiddenColumns
         guard widths != previousWidths || types != previousTypes
-            || sources != previousSources else { return }
+            || sources != previousSources || hidden != previousHidden else { return }
         onFormatChange? {
             $0.columnWidths = widths
             $0.columnTypes = types
             $0.selectSources = sources
+            $0.hiddenColumns = hidden
         }
         undoManager?.registerUndo(withTarget: self) { view in
             view.setColumnFormatting(widths: previousWidths, types: previousTypes,
-                                     sources: previousSources)
+                                     sources: previousSources, hidden: previousHidden)
         }
         modelDidChange()
     }
@@ -2389,6 +2542,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if !(isFullColumnSelection && selectedCols.contains(c)) {
                 selectColumn(c, extend: false)
             }
+        case .hiddenColumnsMarker(let run):
+            // Right-clicking the marker selects the gap, so the menu's show
+            // items act on exactly the run that was clicked.
+            anchor = GridPos(row: 0, col: run.lowerBound)
+            focus = GridPos(row: gridRows - 1, col: run.upperBound)
+            selectionDidChange()
         case .corner:
             return nil
         }
@@ -2461,6 +2620,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             menu.addItem(withTitle: "Insert Column Left", action: #selector(insertColumnLeft(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "Insert Column Right", action: #selector(insertColumnRight(_:)), keyEquivalent: "")
             menu.addItem(withTitle: "Delete Columns", action: #selector(deleteSelectedColumns(_:)), keyEquivalent: "")
+            menu.addItem(withTitle: "Hide Columns", action: #selector(hideSelectedColumns(_:)), keyEquivalent: "")
+            // Only offered where there's something to bring back: over a gap
+            // the selection reaches, or anywhere at all once one exists.
+            if !hiddenColumnsInSelection.isEmpty {
+                menu.addItem(withTitle: "Show Hidden Columns",
+                             action: #selector(showHiddenColumns(_:)), keyEquivalent: "")
+            }
+            if !hiddenColumns.isEmpty {
+                menu.addItem(withTitle: "Show All Hidden Columns",
+                             action: #selector(showAllHiddenColumns(_:)), keyEquivalent: "")
+            }
         }
 
         // Column formatting — hidden for whole-row selections, where "the
@@ -2549,6 +2719,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case #selector(deleteSelectedColumns(_:)):
             guard let model, !isFullRowSelection else { return false }
             return selectedCols.contains(where: { $0 >= 1 && $0 < model.columnCount })
+        case #selector(hideSelectedColumns(_:)):
+            let count = hideableSelectedColumns.count
+            menuItem.title = count == 1 ? "Hide Column" : "Hide \(count) Columns"
+            return !isFullRowSelection && count > 0
+        case #selector(showHiddenColumns(_:)):
+            let count = hiddenColumnsInSelection.count
+            menuItem.title = count == 1 ? "Show Hidden Column" : "Show \(count) Hidden Columns"
+            return !isFullRowSelection && count > 0
+        case #selector(showAllHiddenColumns(_:)):
+            return !hiddenColumns.isEmpty
         case #selector(deleteSelectedRows(_:)):
             guard let model, !isFullColumnSelection else { return false }
             return selectedRows.lowerBound < model.rowCount && model.rowCount > 1

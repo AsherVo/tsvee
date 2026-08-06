@@ -124,6 +124,12 @@ enum MainMenu {
                      action: NSSelectorFromString("insertColumnRight:"), keyEquivalent: "")
         menu.addItem(withTitle: "Delete Columns",
                      action: NSSelectorFromString("deleteSelectedColumns:"), keyEquivalent: "")
+        menu.addItem(withTitle: "Hide Columns",
+                     action: NSSelectorFromString("hideSelectedColumns:"), keyEquivalent: "")
+        menu.addItem(withTitle: "Show Hidden Columns",
+                     action: NSSelectorFromString("showHiddenColumns:"), keyEquivalent: "")
+        menu.addItem(withTitle: "Show All Hidden Columns",
+                     action: NSSelectorFromString("showAllHiddenColumns:"), keyEquivalent: "")
         menu.addItem(.separator())
         let leftArrow = String(UnicodeScalar(UInt16(NSLeftArrowFunctionKey))!)
         let rightArrow = String(UnicodeScalar(UInt16(NSRightArrowFunctionKey))!)

@@ -76,6 +76,22 @@ bundle` app carries).
   can't be deleted or displaced.
 - Full undo/redo.
 
+## Hiding columns
+
+Right-click a column (header or any cell) → **Hide Columns** (also in the
+Sheet menu). Like folding a section, this is a view: **the TSV on disk is
+untouched**, and the state lives in the `.tss` sidecar so it survives
+reopening and follows its column when you drag-reorder.
+
+- The missing letter (C, then E) marks the gap, and a small **◀▶ marker** sits
+  in the letter band where the columns went — click it to bring them back.
+- Or select across the gap and use **Show Hidden Columns**; **Show All Hidden
+  Columns** unfolds every gap at once.
+- Arrow keys step over hidden columns and the cursor is never left inside one.
+  A selection spanning a gap still covers what's hidden there, so copy, clear
+  and delete treat hidden columns as part of the selection.
+- The ID column can't be hidden.
+
 ## Collapsing sections
 
 A `#` or `##` header owns every row beneath it up to the next header of the
@@ -173,6 +189,7 @@ colwidth	<columnIndex>	<points>
 rowheight	<rowIndex>	<points>
 coltype	<columnIndex>	raw|integer|float|text|boolean|select|multiselect
 collapsed	<headerRowIndex>	1
+hiddencol	<columnIndex>	1
 freeze	fieldrow|idcol	0|1
 selectlist	<columnIndex>	<option>	<option>	…
 selectfile	<columnIndex>	<relative path to .tsv>
@@ -184,11 +201,11 @@ value is representable), `selectfile` points at the sheet whose IDs are the
 options, by a path relative to this file.
 
 The UI writes column widths (drag-resize a column), column types, collapsed
-sections and the freeze toggles today; freeze records are only written when a
-pane is un-frozen, since frozen is the default, and `raw` column types are
-never written. Per-row records (`rowheight`, `collapsed`) and per-column ones
-(`colwidth`, `coltype`) are re-keyed when rows/columns are inserted, deleted or
-reordered, so they stay attached to their content, and state on something
+sections, hidden columns and the freeze toggles today; freeze records are only
+written when a pane is un-frozen, since frozen is the default, and `raw` column
+types are never written. Per-row records (`rowheight`, `collapsed`) and
+per-column ones (`colwidth`, `coltype`, `hiddencol`) are re-keyed when
+rows/columns are inserted, deleted or reordered, so they stay attached to their content, and state on something
 deleted is dropped rather than relocated. Unknown record types are preserved verbatim on rewrite, so future
 fields — cell styles, merged headers, calculated columns — can be added in
 `TSSFormat.swift` without breaking older files. That's the extension point:

@@ -13,6 +13,7 @@ import Foundation
 ///     colwidth	<columnIndex>	<points>
 ///     rowheight	<rowIndex>	<points>
 ///     collapsed	<headerRowIndex>	1
+///     hiddencol	<columnIndex>	1
 ///     selectlist	<columnIndex>	<option>	<option>	…
 ///     selectfile	<columnIndex>	<relative path to .tsv>
 ///
@@ -92,6 +93,10 @@ struct TSSFormat {
     /// away "#" can never strand its rows out of sight.
     var collapsedSections: Set<Int> = []
 
+    /// Columns folded out of sight. The ID column is never in here — a sheet
+    /// with no way to identify its rows isn't a sheet.
+    var hiddenColumns: Set<Int> = []
+
     /// Frozen panes. Both default to true; only deviations are persisted.
     var freezeFieldRow = true
     var freezeIDColumn = true
@@ -102,6 +107,7 @@ struct TSSFormat {
     var hasCustomFormatting: Bool {
         !columnWidths.isEmpty || !rowHeights.isEmpty || !columnTypes.isEmpty
             || !selectSources.isEmpty || !collapsedSections.isEmpty
+            || !hiddenColumns.isEmpty
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
 
@@ -109,9 +115,9 @@ struct TSSFormat {
     /// where their options come from. Records from a version of TSS we don't
     /// know are counted here too — we can't rule out that they matter.
     ///
-    /// Everything else — widths, heights, collapsed sections, frozen panes —
-    /// is decoration: how one person happens to be looking at the sheet. A
-    /// difference there is never worth interrupting anyone over.
+    /// Everything else — widths, heights, collapsed sections, hidden columns,
+    /// frozen panes — is decoration: how one person happens to be looking at
+    /// the sheet. A difference there is never worth interrupting anyone over.
     struct SubstantiveContent: Equatable {
         var columnTypes: [Int: ColumnType]
         var selectSources: [Int: SelectSource]
@@ -172,6 +178,10 @@ struct TSSFormat {
                 if let index = Int(fields[1]), index >= 0, fields[2] != "0" {
                     format.collapsedSections.insert(index)
                 }
+            case "hiddencol" where fields.count >= 3:
+                if let index = Int(fields[1]), index >= 1, fields[2] != "0" {
+                    format.hiddenColumns.insert(index)
+                }
             case "freeze" where fields.count >= 3:
                 switch fields[1] {
                 case "fieldrow": format.freezeFieldRow = fields[2] != "0"
@@ -208,6 +218,9 @@ struct TSSFormat {
         }
         for index in collapsedSections.sorted() {
             lines.append("collapsed\t\(index)\t1")
+        }
+        for index in hiddenColumns.sorted() where index >= 1 {
+            lines.append("hiddencol\t\(index)\t1")
         }
         if !freezeFieldRow { lines.append("freeze\tfieldrow\t0") }
         if !freezeIDColumn { lines.append("freeze\tidcol\t0") }

@@ -341,3 +341,29 @@ final class SidecarSubstanceTests: XCTestCase {
                        TSSFormat.parse(narrow.serialize()).substantiveContent)
     }
 }
+
+final class HiddenColumnTests: XCTestCase {
+
+    func testHiddenColumnsRoundTrip() {
+        var format = TSSFormat()
+        format.hiddenColumns = [3, 1]
+        let out = format.serialize()
+        XCTAssertTrue(out.contains("hiddencol\t1\t1"))
+        XCTAssertTrue(out.contains("hiddencol\t3\t1"))
+        XCTAssertEqual(TSSFormat.parse(out).hiddenColumns, [1, 3])
+    }
+
+    func testIDColumnIsNeverHidden() {
+        // Nothing in the app can write this, but a hand-edited sidecar can.
+        XCTAssertTrue(TSSFormat.parse("hiddencol\t0\t1\n").hiddenColumns.isEmpty)
+        XCTAssertTrue(TSSFormat.parse("hiddencol\t2\t0\n").hiddenColumns.isEmpty)
+    }
+
+    func testHidingIsDecorative() {
+        // Someone else folding a column away is not a conflict worth a dialog.
+        var hidden = TSSFormat()
+        hidden.hiddenColumns = [2]
+        XCTAssertEqual(TSSFormat().substantiveContent, hidden.substantiveContent)
+        XCTAssertTrue(hidden.hasCustomFormatting)
+    }
+}
