@@ -87,6 +87,13 @@ final class DocumentWindowController: NSWindowController {
         wireUp(document: document)
         window.makeFirstResponder(spreadsheetView)
 
+        // Coming to the front is when a sheet showing stale content starts
+        // doing harm, so that's when it re-reads its file. (An app switch
+        // resigns and re-takes key, so returning to TSVee counts too.)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(windowBecameKey(_:)),
+            name: NSWindow.didBecomeKeyNotification, object: window)
+
         // Debug/automation hook: `-TSVeeDebugDirty 1` marks the document
         // edited after launch so the dirty indicator can be screenshot-tested.
         if UserDefaults.standard.bool(forKey: "TSVeeDebugDirty") {
@@ -139,6 +146,22 @@ final class DocumentWindowController: NSWindowController {
         // The document was read before this controller existed, so push the
         // initial state through by hand.
         refreshFormulaBar()
+    }
+
+    // MARK: - Changes made to the file on disk
+
+    @objc private func windowBecameKey(_ notification: Notification) {
+        (document as? TSVDocument)?.reconcileWithDiskIfNeeded(confirmingIn: window)
+    }
+
+    /// True while a cell's in-place editor is open with text in it.
+    var isEditingCell: Bool { spreadsheetView.isEditingCell }
+
+    /// About to swap the document's contents out from under this window: drop
+    /// the in-cell editor first, so it can't commit into rows that are gone.
+    func prepareForReload() {
+        spreadsheetView.cancelCellEdit()
+        findBar.noteModelChanged()
     }
 
     // MARK: - Find & replace (menu actions arrive via the responder chain)

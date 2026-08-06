@@ -80,9 +80,13 @@ final class SelectOptionsResolver {
 enum SelectSourcePanel {
 
     /// Runs the modal dialog. nil means the user cancelled.
+    ///
+    /// `suggested` seeds the ad-hoc list for a column that isn't already
+    /// configured as one — normally the values the column already holds.
     static func run(columnName: String, typeTitle: String,
-                    existing: SelectSource?, tsvURL: URL?) -> SelectSource? {
-        let controller = Controller(existing: existing, tsvURL: tsvURL)
+                    existing: SelectSource?, suggested: [String] = [],
+                    tsvURL: URL?) -> SelectSource? {
+        let controller = Controller(existing: existing, suggested: suggested, tsvURL: tsvURL)
 
         let alert = NSAlert()
         alert.messageText = "\(typeTitle) Options for \(columnName)"
@@ -110,7 +114,7 @@ enum SelectSourcePanel {
         private let sheetPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
         private let tsvURL: URL?
 
-        init(existing: SelectSource?, tsvURL: URL?) {
+        init(existing: SelectSource?, suggested: [String], tsvURL: URL?) {
             self.tsvURL = tsvURL
             super.init()
 
@@ -126,6 +130,11 @@ enum SelectSourcePanel {
 
             if case .list(let options) = existing {
                 listField.stringValue = options.joined(separator: ", ")
+            } else {
+                // Nothing configured (or options come from a sheet): start the
+                // list off with what the column already contains, so turning a
+                // column of hand-typed values into a select needs no retyping.
+                listField.stringValue = suggested.joined(separator: ", ")
             }
             var useFile = false
             if case .file = existing { useFile = true }

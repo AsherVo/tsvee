@@ -1698,6 +1698,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
     }
 
+    /// Whether a cell is open for editing — text the user has typed but not
+    /// committed, which anything replacing the model needs to know about.
+    var isEditingCell: Bool { editor != nil }
+
+    /// Throws away an in-progress cell edit from outside (a reload).
+    func cancelCellEdit() { cancelEdit() }
+
     private func cancelEdit() {
         guard let field = editor else { return }
         editor = nil
@@ -2162,6 +2169,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             columnName: columnName,
             typeTitle: type == .multiselect ? "Multi-Select" : "Select",
             existing: cachedSelectSources[anchorColumn],
+            suggested: valuesInUse(columns: columns),
             tsvURL: documentURLProvider?()) else { return }
 
         onFormatChange? { format in
@@ -2171,6 +2179,33 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             }
         }
         modelDidChange()
+    }
+
+    /// The distinct values the given columns already hold, in sheet order —
+    /// what the select dialog offers as a ready-made ad-hoc list. Only cells a
+    /// select column would govern count (rows with an ID, no headers or field
+    /// names), and values are split on commas the way a multi-select cell is.
+    ///
+    /// A column with more distinct values than any list could plausibly want
+    /// isn't an options column at all — free-form text that happens to be
+    /// getting retyped — so it suggests nothing rather than a wall of text.
+    private func valuesInUse(columns: [Int]) -> [String] {
+        guard let model else { return [] }
+        let limit = 100
+        var seen = Set<String>()
+        var values: [String] = []
+        for r in 0..<model.rowCount
+        where model.headerLevel(ofRow: r) == 0 && !model.isFieldNameRow(r)
+            && !model.value(row: r, column: 0).isEmpty {
+            for c in columns where c < model.columnCount {
+                for token in SelectCell.tokens(model.value(row: r, column: c))
+                where !token.isEmpty && seen.insert(token).inserted {
+                    if values.count == limit { return [] }
+                    values.append(token)
+                }
+            }
+        }
+        return values
     }
 
     @objc private func autoSizeColumns(_ sender: Any?) {

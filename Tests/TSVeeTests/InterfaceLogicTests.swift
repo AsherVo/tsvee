@@ -289,3 +289,55 @@ final class TabTitleTests: XCTestCase {
                        "v1.2")
     }
 }
+
+/// What counts as a conflict when the sidecar changes underneath an open
+/// sheet: data meaning, never how someone happens to be viewing it.
+final class SidecarSubstanceTests: XCTestCase {
+
+    private func format(_ mutate: (inout TSSFormat) -> Void) -> TSSFormat {
+        var format = TSSFormat()
+        mutate(&format)
+        return format
+    }
+
+    func testDecorationIsNotSubstantive() {
+        let plain = TSSFormat()
+        let decorated = format {
+            $0.columnWidths[1] = 220
+            $0.rowHeights[4] = 60
+            $0.collapsedSections.insert(7)
+            $0.freezeFieldRow = false
+            $0.freezeIDColumn = false
+        }
+        XCTAssertEqual(plain.substantiveContent, decorated.substantiveContent)
+    }
+
+    func testColumnTypesAndOptionsAreSubstantive() {
+        let typed = format { $0.columnTypes[2] = .boolean }
+        XCTAssertNotEqual(TSSFormat().substantiveContent, typed.substantiveContent)
+
+        let listed = format {
+            $0.columnTypes[2] = .select
+            $0.selectSources[2] = .list(["red", "green"])
+        }
+        let relisted = format {
+            $0.columnTypes[2] = .select
+            $0.selectSources[2] = .list(["red", "blue"])
+        }
+        XCTAssertNotEqual(listed.substantiveContent, relisted.substantiveContent)
+        XCTAssertEqual(listed.substantiveContent, listed.substantiveContent)
+    }
+
+    func testUnknownRecordsCountAsSubstantive() {
+        // A record from a newer TSS can't be assumed decorative.
+        let future = TSSFormat.parse("tss\t0\nsomethingnew\t1\tvalue\n")
+        XCTAssertNotEqual(TSSFormat().substantiveContent, future.substantiveContent)
+    }
+
+    func testDecorationDifferenceSurvivesRoundTrip() {
+        let wide = format { $0.columnWidths[0] = 300 }
+        let narrow = format { $0.columnWidths[0] = 80 }
+        XCTAssertEqual(TSSFormat.parse(wide.serialize()).substantiveContent,
+                       TSSFormat.parse(narrow.serialize()).substantiveContent)
+    }
+}

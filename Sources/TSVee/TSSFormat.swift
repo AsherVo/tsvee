@@ -105,6 +105,25 @@ struct TSSFormat {
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
 
+    /// The half of the sidecar that says what the data *is*: column types and
+    /// where their options come from. Records from a version of TSS we don't
+    /// know are counted here too — we can't rule out that they matter.
+    ///
+    /// Everything else — widths, heights, collapsed sections, frozen panes —
+    /// is decoration: how one person happens to be looking at the sheet. A
+    /// difference there is never worth interrupting anyone over.
+    struct SubstantiveContent: Equatable {
+        var columnTypes: [Int: ColumnType]
+        var selectSources: [Int: SelectSource]
+        var unknownRecords: [String]
+    }
+
+    var substantiveContent: SubstantiveContent {
+        SubstantiveContent(columnTypes: columnTypes,
+                           selectSources: selectSources,
+                           unknownRecords: unknownRecords)
+    }
+
     // MARK: - Sidecar location
 
     static func sidecarURL(for tsvURL: URL) -> URL {
