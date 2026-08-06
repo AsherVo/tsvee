@@ -1057,12 +1057,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         path.fill()
     }
 
-    /// "12 rows" for a collapsed section header, nil for every other row —
-    /// what a folded header owes you, since the rows themselves are gone.
+    /// "12 entries" for a collapsed section header, nil for every other row —
+    /// what a folded header owes you, since the rows themselves are gone. It
+    /// counts entries rather than rows, the same as the selection tally: the
+    /// spacer rows and comments people pad sections with aren't content, and
+    /// counting them makes a section look bigger than it is.
     private func foldedRowsLabel(forRow row: Int) -> String? {
         guard collapsedRows.contains(row), let model,
               let body = model.sectionBody(ofRow: row) else { return nil }
-        return body.count == 1 ? "1 row" : "\(body.count) rows"
+        let entries = model.entryCount(in: body)
+        return entries == 1 ? "1 entry" : "\(entries) entries"
     }
 
     private static let badgeAttributes: [NSAttributedString.Key: Any] = [

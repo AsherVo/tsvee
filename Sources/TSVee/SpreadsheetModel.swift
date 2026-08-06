@@ -182,6 +182,17 @@ final class SpreadsheetModel {
         return ids
     }
 
+    /// How many of the given rows are entries — the same rule the tally and
+    /// `entryIDs` use: a row needs an ID to be one, so `#` headers and
+    /// comments, the field-name row, and blank rows don't count. (Duplicates
+    /// do: two rows are two entries even when they collide.)
+    func entryCount(in rowRange: ClosedRange<Int>) -> Int {
+        rowRange.filter { row in
+            row < rowCount && headerLevel(ofRow: row) == 0
+                && !isFieldNameRow(row) && !rows[row][0].isEmpty
+        }.count
+    }
+
     /// First row whose ID matches exactly (used for cross-file navigation).
     /// The field-name row doesn't count.
     func firstRow(withID id: String) -> Int? {

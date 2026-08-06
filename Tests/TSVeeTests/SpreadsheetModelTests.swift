@@ -522,3 +522,37 @@ final class FindReplaceTests: XCTestCase {
         XCTAssertEqual(model.value(row: 0, column: 0), "a")
     }
 }
+
+final class EntryCountTests: XCTestCase {
+
+    private func model(_ tsv: String) -> SpreadsheetModel {
+        let model = SpreadsheetModel()
+        model.load(tsv: tsv)
+        return model
+    }
+
+    func testBlankAndHeaderRowsDontCount() {
+        // ID / # Enemies / slime / (blank) / ### note / goblin
+        let m = model("ID\tName\n# Enemies\t\nslime\tSlime\n\t\n### note\t\ngoblin\tGoblin\n")
+        XCTAssertEqual(m.entryCount(in: 0...5), 2)
+        XCTAssertEqual(m.entryCount(in: 2...5), 2)
+        XCTAssertEqual(m.entryCount(in: 3...4), 0)
+    }
+
+    func testCountMatchesTheFoldedBody() {
+        let m = model("ID\tName\n# Enemies\t\nslime\tSlime\n\t\ngoblin\tGoblin\n")
+        let body = m.sectionBody(ofRow: 1)
+        XCTAssertEqual(body, 2...4)
+        XCTAssertEqual(m.entryCount(in: body!), 2)
+    }
+
+    func testRangePastTheEndIsIgnored() {
+        let m = model("ID\nalpha\n")
+        XCTAssertEqual(m.entryCount(in: 0...50), 1)
+    }
+
+    func testDuplicateIDsAreStillTwoEntries() {
+        let m = model("ID\nalpha\nalpha\n")
+        XCTAssertEqual(m.entryCount(in: 0...2), 2)
+    }
+}

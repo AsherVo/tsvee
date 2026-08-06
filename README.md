@@ -106,7 +106,9 @@ same or higher level — so collapsing `# Enemies` folds its `## Forest` and
   the whole sheet. Both pairs are also on the right-click menu.
 - Folded rows are hidden, not changed — **the TSV on disk is untouched**.
   The skipped row numbers and a firm line under the header mark the seam, and
-  a **“12 rows” badge** in the header's ID cell says how much is folded away.
+  a **“12 entries” badge** in the header's ID cell says how much is folded
+  away — entries, not rows, so blank spacers and `###` comments don't inflate
+  the count (the same rule the selection tally uses).
 - Arrow keys step over a folded section in one press, and the cursor is never
   left inside one. A selection that ends on a collapsed header still covers
   everything folded under it — the same way a fold in the middle of a
