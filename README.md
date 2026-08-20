@@ -31,14 +31,25 @@ bundle` app carries).
    closes the section it sits in. All are exempt from the uniqueness rule, so
    two `## Stats` sections under different headers are fine.
 3. If row 1's ID cell is literally `ID`, it's treated as the **field-name
-   row**: bold on a grey band and exempt from uniqueness. IDs in data rows
-   are drawn in monospace.
+   row**: bold on a grey band and exempt from uniqueness. Column names
+   word-wrap — the row grows to fit the longest one rather than clipping it.
+   IDs in data rows are drawn in monospace.
 4. Empty IDs are allowed (and exempt from uniqueness).
+5. **`\n` in a cell is a line break.** A file line is a row, so multi-line
+   content travels escaped: `Hits hard.\nWeak to fire.` on disk, two lines in
+   the grid (and in the clipboard, so a copied block stays rectangular). Press
+   **⌥Enter** while editing a text or plain column to add one; the row grows to
+   fit every line. Other backslashes are never rewritten, so saves stay
+   diff-clean — the cost is that a cell can't hold a literal `\n`. Columns with
+   a type that isn't free-form (numbers, checkboxes, select) flatten a pasted
+   line break to a space.
 
 ## Google-Sheets-isms
 
 - Column letters / row numbers, accent-colored range selection, a formula bar
-  with an `A1` name box that edits the raw cell value.
+  with an `A1` name box that edits the raw cell value — raw meaning the file's
+  own spelling, so a multi-line cell reads and edits as `\n` in that one-line
+  field.
 - **Selection tally**: select more than one cell and the right of the formula
   bar reads `Count: 12/16` — populated cells out of cells counted. Select the
   ID column and it reads `12 entries` instead, since every counted row has an
@@ -59,9 +70,11 @@ bundle` app carries).
   multi-row/column selections move together, and `.tss` widths/heights follow
   their columns/rows. The ID column stays put.
 - Type into a selected cell to start editing; **Enter** commits and moves
-  down (⇧Enter up), **Tab** right (⇧Tab left), **Esc** cancels. Double-click
-  or Enter to edit in place. Arrow keys navigate; ⇧-arrows extend the
-  selection.
+  down (⇧Enter up), **Tab** right (⇧Tab left), **⌥Enter** adds a line break,
+  **Esc** cancels. Double-click or Enter to edit in place. Arrow keys navigate;
+  ⇧-arrows extend the selection. While typing over a cell the arrows commit and
+  move on; in a deliberate edit (double-click, Enter, the formula bar) they
+  belong to the insertion point instead.
 - Copy/cut/paste whole rectangular blocks as TSV — round-trips cleanly with
   Google Sheets, Excel, and Numbers.
 - Click row numbers / column letters to select whole rows/columns; drag a
@@ -124,11 +137,13 @@ same or higher level — so collapsing `# Enemies` folds its `## Forest` and
 
 Right-click a column (header or any cell) → **Column Data Type**:
 
-- **Raw** (default) — plain left-aligned strings, exactly as on disk.
+- **Raw** (default) — plain left-aligned strings, exactly as on disk. A single
+  long line stays on one clipped line; a value with `\n` line breaks in it lays
+  out as the block of lines it is, and its row grows to fit.
 - **Integer** / **Float** — right-aligned; values that don't parse are shown
   in red so bad data is obvious at a glance. Nothing is ever rewritten.
 - **Text** — word-wrapped display; rows grow automatically to fit the tallest
-  text cell. Misspellings get a red squiggle in the grid (not just while
+  text cell, `\n` line breaks included. Misspellings get a red squiggle in the grid (not just while
   editing), and right-clicking one offers corrections plus **Ignore
   Spelling** / **Learn Spelling**.
 - **Boolean** — a checkbox on every line that has an ID; the file holds
@@ -226,6 +241,7 @@ Sources/TSVee/
   DocumentWindowController.swift
   MainMenu.swift / AppDelegate.swift / main.swift
 Support/Info.plist              app bundle metadata + .tsv file association
+Support/tsvee_icon.png          1024px app icon art (`make bundle` renders the .icns)
 Tests/TSVeeTests/               model + TSS unit tests
 ```
 

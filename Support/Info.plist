@@ -8,6 +8,8 @@
 	<string>TSVee</string>
 	<key>CFBundleExecutable</key>
 	<string>TSVee</string>
+	<key>CFBundleIconFile</key>
+	<string>TSVee</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.asherv.tsvee</string>
 	<key>CFBundlePackageType</key>

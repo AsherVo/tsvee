@@ -77,16 +77,25 @@ final class TextCellRenderer {
 
     /// `rect` is the text area (the cell already inset), in the view's flipped
     /// coordinates.
+    /// `verticallyCentered` sits the laid-out block in the middle of `rect`
+    /// instead of at its top — what a wrapped header wants in a row sized by
+    /// some other, taller column.
     func draw(_ text: String, font: NSFont, color: NSColor,
-              in rect: NSRect, misspellings: [NSRange]) {
+              in rect: NSRect, misspellings: [NSRange],
+              verticallyCentered: Bool = false) {
         prepare(text: text, font: font, color: color, width: rect.width)
         let glyphs = layout.glyphRange(for: container)
+        var origin = rect.origin
+        if verticallyCentered {
+            let used = layout.usedRect(for: container).height
+            origin.y += max((rect.height - used) / 2, 0)
+        }
 
         NSGraphicsContext.current?.saveGraphicsState()
         rect.clip()
-        layout.drawGlyphs(forGlyphRange: glyphs, at: rect.origin)
+        layout.drawGlyphs(forGlyphRange: glyphs, at: origin)
         for range in misspellings {
-            drawSquiggle(under: range, origin: rect.origin)
+            drawSquiggle(under: range, origin: origin)
         }
         NSGraphicsContext.current?.restoreGraphicsState()
     }

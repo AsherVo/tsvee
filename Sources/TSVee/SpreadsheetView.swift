@@ -116,6 +116,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var cachedHeights: [Int: CGFloat] = [:]
     private var cachedTypes: [Int: ColumnType] = [:]
     private var textColumnIndices: [Int] = []
+    /// Columns whose cells can need more than one line: the wrapping `text`
+    /// ones plus any holding a value with line breaks in it.
+    private var growColumns: [Int] = []
     private var booleanColumnIndices: Set<Int> = []
     private var cachedSelectSources: [Int: SelectSource] = [:]
     /// Resolved option lists (and sets, for validation) per select column —
@@ -260,13 +263,27 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if let model, r < model.rowCount {
             let level = model.headerLevel(ofRow: r)
             if level > 0 { return Metrics.headerRowHeights[level - 1] }
-            // Text columns wrap, so rows grow to fit their tallest text cell.
-            if !textColumnIndices.isEmpty {
+            // Column headers wrap in every column, not just the `text` ones, so
+            // the field-name row grows to fit the longest name it holds.
+            if model.isFieldNameRow(r) {
+                let font = cellFont(forRow: r)
                 var h = Metrics.defaultRowHeight
-                for c in textColumnIndices where c < model.columnCount {
+                for c in 0..<model.columnCount where !hiddenColumns.contains(c) {
                     let text = model.value(row: r, column: c)
                     guard !text.isEmpty else { continue }
-                    h = max(h, wrappedHeight(text: text, width: width(ofColumn: c)))
+                    h = max(h, wrappedHeight(text: text, width: width(ofColumn: c), font: font))
+                }
+                return h
+            }
+            // Rows grow to fit whatever has to be laid out over more than
+            // one line: a wrapping `text` cell, or any cell with line breaks.
+            if !growColumns.isEmpty {
+                var h = Metrics.defaultRowHeight
+                for c in growColumns where c < model.columnCount && !hiddenColumns.contains(c) {
+                    let text = model.value(row: r, column: c)
+                    guard !text.isEmpty, wrapsText(row: r, column: c, text: text) else { continue }
+                    h = max(h, wrappedHeight(text: text, width: width(ofColumn: c),
+                                             font: cellFont(forRow: r, column: c)))
                 }
                 return h
             }
@@ -274,15 +291,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         return Metrics.defaultRowHeight
     }
 
-    private func wrappedHeight(text: String, width: CGFloat) -> CGFloat {
-        let key = "\(Int(width))|\(text)"
+    private func wrappedHeight(text: String, width: CGFloat,
+                              font: NSFont = .systemFont(ofSize: 12)) -> CGFloat {
+        let key = "\(Int(width))|\(font.fontName)\(font.pointSize)|\(text)"
         if let cached = wrapHeightCache[key] { return cached }
         let style = NSMutableParagraphStyle()
         style.lineBreakMode = .byWordWrapping
         let bounds = (text as NSString).boundingRect(
             with: NSSize(width: max(width - 12, 20), height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin],
-            attributes: [.font: NSFont.systemFont(ofSize: 12), .paragraphStyle: style])
+            attributes: [.font: font, .paragraphStyle: style])
         let height = max(ceil(bounds.height) + 8, Metrics.defaultRowHeight)
         if wrapHeightCache.count > 50_000 { wrapHeightCache.removeAll() }
         wrapHeightCache[key] = height
@@ -301,6 +319,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         cachedHeights = format.rowHeights
         cachedTypes = format.columnTypes
         textColumnIndices = format.columnTypes.filter { $0.value == .text }.keys.sorted()
+        growColumns = Set(textColumnIndices).union(model.columnsWithLineBreaks).sorted()
         booleanColumnIndices = Set(format.columnTypes.filter { $0.value == .boolean }.keys)
         cachedSelectSources = format.selectSources
         refreshSelectOptions(format: format)
@@ -462,8 +481,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         Self.columnLetters(focus.col) + String(focus.row + 1)
     }
 
+    /// The focused cell as the formula bar shows it: the file's spelling, so a
+    /// multi-line value reads (and edits) as `\n` in that one-line field.
     func focusedCellValue() -> String {
-        model?.value(row: focus.row, column: focus.col) ?? ""
+        SpreadsheetModel.encodeCell(model?.value(row: focus.row, column: focus.col) ?? "")
     }
 
     // MARK: - Drawing
@@ -593,6 +614,19 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 if c == 0, let label = foldedRowsLabel(forRow: r) {
                     let pill = drawBadge(label, rightAlignedIn: rect)
                     textClip.size.width = max(pill.minX - 4 - textClip.minX, 0)
+                }
+
+                // Column headers wrap rather than clip — the row was sized
+                // to fit them, and a name too long for its column is the one
+                // label you can least afford to lose the end of. A raw value
+                // with line breaks in it lays out the same way, so every line
+                // shows.
+                if type == .raw, model.isFieldNameRow(r) || text.contains("\n") {
+                    var area = rect.insetBy(dx: 6, dy: 4)
+                    area.size.width = max(min(area.maxX, textClip.maxX) - area.minX, 1)
+                    textRenderer.draw(text, font: font, color: rowColor, in: area,
+                                      misspellings: [], verticallyCentered: true)
+                    continue
                 }
 
                 switch type {
@@ -903,6 +937,37 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             return .monospacedSystemFont(ofSize: 11.5, weight: .medium)
         }
         return cellFont(forRow: row)
+    }
+
+    /// A cell's effective column type. Header and field-name rows ignore the
+    /// column's type entirely — they're raw. Past the end of the data a row is
+    /// a plain data row in waiting, so the column's type already applies.
+    private func cellType(row: Int, column: Int) -> ColumnType {
+        if let model, row < model.rowCount,
+           model.headerLevel(ofRow: row) > 0 || model.isFieldNameRow(row) { return .raw }
+        return cachedTypes[column] ?? .raw
+    }
+
+    /// True when a cell is laid out as a block of lines instead of one clipped
+    /// line: a `text` column, which wraps, or a `raw` cell with line breaks in
+    /// it. (The field-name row wraps too, but its height is settled before
+    /// this is asked.)
+    private func wrapsText(row: Int, column: Int, text: String) -> Bool {
+        switch cellType(row: row, column: column) {
+        case .text: return true
+        case .raw: return text.contains("\n")
+        default: return false
+        }
+    }
+
+    /// Where a line break is content rather than a stray control character:
+    /// `raw` and `text` cells, the two kinds that hold free-form strings.
+    /// Numbers, checkboxes and select tokens flatten it to a space.
+    private func allowsLineBreaks(at pos: GridPos) -> Bool {
+        switch cellType(row: pos.row, column: pos.col) {
+        case .raw, .text: return true
+        default: return false
+        }
     }
 
     private func textColor(forRow row: Int) -> NSColor {
@@ -1703,11 +1768,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Editing
 
-    private func sanitize(_ text: String) -> String {
-        text.replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
+    /// A tab can never live in a cell — it's the column separator — and CR is
+    /// normalized to LF the way the file is on the way in. Line breaks survive
+    /// only where they're content (see `allowsLineBreaks`).
+    private func sanitize(_ text: String, at pos: GridPos) -> String {
+        let flat = text.replacingOccurrences(of: "\t", with: " ")
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard allowsLineBreaks(at: pos) else {
+            return flat.replacingOccurrences(of: "\n", with: " ")
+        }
+        return flat
     }
 
     func beginEditing(at pos: GridPos, initialText: String?) {
@@ -1722,6 +1793,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let frame = cellScreenRect(pos).insetBy(dx: 1, dy: 1)
 
         let isTextColumn = isTextCell(pos)
+        let multiline = allowsLineBreaks(at: pos)
 
         let field = NSTextField(frame: frame)
         field.font = cellFont(forRow: pos.row, column: pos.col)
@@ -1731,7 +1803,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         field.backgroundColor = .textBackgroundColor
         field.textColor = .labelColor
         field.delegate = self
-        if isTextColumn {
+        if multiline {
+            // ⌥Enter puts a line break in, which a single-line cell would
+            // swallow — and once the value has lines, it has to wrap to show
+            // them.
             field.cell?.usesSingleLineMode = false
             field.cell?.wraps = true
             field.cell?.isScrollable = false
@@ -1783,7 +1858,28 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if editSessionFromTyping, editingSelectOptions != nil {
             autocompleteSelectEditor(field)
         }
+        sizeEditorToFit()
         needsDisplay = true
+    }
+
+    /// Grows a wrapping editor downward over the rows below it, so the lines a
+    /// value already has (and the ones ⌥Enter adds) are all visible while
+    /// typing — the row itself only grows once the edit is committed.
+    private func sizeEditorToFit() {
+        guard let field = editor, let cell = editingCell,
+              field.cell?.wraps == true else { return }
+        var frame = cellScreenRect(cell).insetBy(dx: 1, dy: 1)
+        let fits = NSRect(x: 0, y: 0, width: frame.width, height: .greatestFiniteMagnitude)
+        let needed = field.cell?.cellSize(forBounds: fits).height ?? frame.height
+        // Never past the bottom of the viewport: an editor that runs off the
+        // window would put the end of what you're typing out of reach.
+        let room = visibleRect.maxY - frame.minY
+        frame.size.height = min(max(frame.height, ceil(needed) + 2), max(room, frame.height))
+        if field.frame != frame {
+            field.frame = frame
+            // Shrinking uncovers grid the editor was standing on.
+            needsDisplay = true
+        }
     }
 
     private enum MoveAfterEdit { case up, down, left, right }
@@ -1791,7 +1887,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func commitEdit(thenMove direction: MoveAfterEdit?) {
         guard let field = editor, let cell = editingCell, !isCommittingEdit else { return }
         isCommittingEdit = true
-        let text = sanitize(field.stringValue)
+        let text = sanitize(field.stringValue, at: cell)
         editor = nil
         editingCell = nil
         editingSelectOptions = nil
@@ -1829,7 +1925,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     /// Commit coming from the formula bar.
     func applyToFocusedCell(_ text: String) {
-        model?.setValue(sanitize(text), row: focus.row, column: focus.col)
+        // The bar shows the file's own spelling of the value, `\n` and all.
+        model?.setValue(sanitize(SpreadsheetModel.decodeCell(text), at: focus),
+                        row: focus.row, column: focus.col)
         window?.makeFirstResponder(self)
     }
 
@@ -1851,10 +1949,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case #selector(NSResponder.cancelOperation(_:)):
             cancelEdit()
             return true
-        case #selector(NSResponder.moveUp(_:)):
+        // Arrows commit and move only while typing a fresh value over a cell.
+        // Once the session is a real edit (double-click, Enter, the formula
+        // bar), every arrow belongs to the insertion point — up and down
+        // included, since a wrapped value has lines to move between.
+        case #selector(NSResponder.moveUp(_:)) where editSessionFromTyping:
             commitEdit(thenMove: .up)
             return true
-        case #selector(NSResponder.moveDown(_:)):
+        case #selector(NSResponder.moveDown(_:)) where editSessionFromTyping:
             commitEdit(thenMove: .down)
             return true
         case #selector(NSResponder.moveLeft(_:)) where editSessionFromTyping:
@@ -1876,6 +1978,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     func controlTextDidChange(_ notification: Notification) {
         guard let field = notification.object as? NSTextField, field === editor else { return }
         autocompleteSelectEditor(field)
+        sizeEditorToFit()
     }
 
     /// Inline autocomplete for select cells: the first option the token being
@@ -1955,8 +2058,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     @objc func copy(_ sender: Any?) {
         guard let model else { return }
         let rows = selectedRows, cols = selectedCols
+        // Cell line breaks travel escaped, exactly as in the file — a raw one
+        // would read as the end of the row to every other spreadsheet.
         let text = rows.map { r in
-            cols.map { c in model.value(row: r, column: c) }.joined(separator: "\t")
+            cols.map { c in SpreadsheetModel.encodeCell(model.value(row: r, column: c)) }
+                .joined(separator: "\t")
         }.joined(separator: "\n")
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -1979,7 +2085,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let origin = GridPos(row: selectedRows.lowerBound, col: selectedCols.lowerBound)
         for (dr, line) in lines.enumerated() {
             for (dc, value) in line.enumerated() {
-                model.setValue(value, row: origin.row + dr, column: origin.col + dc)
+                let pos = GridPos(row: origin.row + dr, col: origin.col + dc)
+                model.setValue(sanitize(SpreadsheetModel.decodeCell(value), at: pos),
+                               row: pos.row, column: pos.col)
             }
         }
         undoManager?.setActionName("Paste")
@@ -2381,15 +2489,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 // handful of candidate strings.
                 var candidates: [(row: Int, count: Int)] = []
                 for r in 0..<model.rowCount {
-                    let n = model.value(row: r, column: c).count
+                    // A multi-line cell is only as wide as its longest line.
+                    let value = model.value(row: r, column: c)
+                    let n = value.contains("\n")
+                        ? (value.components(separatedBy: "\n").map(\.count).max() ?? 0)
+                        : value.count
                     if n > 0 { candidates.append((r, n)) }
                 }
                 candidates.sort { $0.count > $1.count }
                 var maxWidth = Metrics.minColWidth
                 for (r, _) in candidates.prefix(24) {
-                    let text = model.value(row: r, column: c)
-                    let w = (text as NSString).size(withAttributes: [.font: cellFont(forRow: r, column: c)]).width
-                    maxWidth = max(maxWidth, w + 14)
+                    let font = cellFont(forRow: r, column: c)
+                    for line in model.value(row: r, column: c).components(separatedBy: "\n") {
+                        let w = (line as NSString).size(withAttributes: [.font: font]).width
+                        maxWidth = max(maxWidth, w + 14)
+                    }
                 }
                 // Select cells clip their text short of the dropdown chevron.
                 if let type = format.columnTypes[c], type == .select || type == .multiselect {

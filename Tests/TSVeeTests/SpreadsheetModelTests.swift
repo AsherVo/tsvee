@@ -32,6 +32,35 @@ final class SpreadsheetModelTests: XCTestCase {
         XCTAssertEqual(model.tsvString(), text)
     }
 
+    // MARK: - Line breaks inside a cell
+
+    func testLoadDecodesEscapedLineBreaks() {
+        let model = makeModel("ID\tNotes\na\tHits hard.\\nWeak to fire.\n")
+        XCTAssertEqual(model.value(row: 1, column: 1), "Hits hard.\nWeak to fire.")
+        XCTAssertEqual(model.columnsWithLineBreaks, [1])
+    }
+
+    func testSaveEscapesLineBreaksAndRoundTrips() {
+        let text = "ID\tNotes\na\tone\\ntwo\\nthree\n"
+        let model = makeModel(text)
+        XCTAssertEqual(model.tsvString(), text)
+    }
+
+    func testEditedLineBreaksAreEscapedOnSaveAndNotedForLayout() {
+        let model = makeModel("ID\tNotes\na\tplain\n")
+        XCTAssertEqual(model.columnsWithLineBreaks, [])
+        model.setValue("two\nlines", row: 1, column: 1)
+        XCTAssertEqual(model.columnsWithLineBreaks, [1])
+        XCTAssertEqual(model.tsvString(), "ID\tNotes\na\ttwo\\nlines\n")
+    }
+
+    func testOtherBackslashesAreLeftAlone() {
+        let text = "ID\tPath\na\tC:\\data\\x\n"
+        let model = makeModel(text)
+        XCTAssertEqual(model.value(row: 1, column: 1), "C:\\data\\x")
+        XCTAssertEqual(model.tsvString(), text)
+    }
+
     func testSaveTrimsTrailingEmptyRowsAndColumns() {
         let model = makeModel("ID\tName\na\tAlpha")
         model.ensureSize(rows: 10, columns: 8)   // simulate scratch-space edits

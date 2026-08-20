@@ -19,6 +19,8 @@ struct FindOptions: Equatable {
 ///    Header rows are exempt from the uniqueness rule.
 ///  - If the very first row's ID cell is exactly "ID", that row is treated as
 ///    the field-name row (styled bold, exempt from uniqueness).
+///  - A line break inside a cell is stored as the two characters `\n`, since a
+///    file line is a row. See `decodeCell` / `encodeCell`.
 final class SpreadsheetModel {
 
     private(set) var rows: [[String]] = [["ID"]]
@@ -48,7 +50,8 @@ final class SpreadsheetModel {
             .replacingOccurrences(of: "\r", with: "\n")
         if text.hasSuffix("\n") { text.removeLast() }
 
-        var parsed = text.components(separatedBy: "\n").map { $0.components(separatedBy: "\t") }
+        var parsed = text.components(separatedBy: "\n")
+            .map { $0.components(separatedBy: "\t").map(Self.decodeCell) }
         if parsed.isEmpty { parsed = [[""]] }
 
         let width = max(parsed.map(\.count).max() ?? 1, 1)
@@ -57,6 +60,7 @@ final class SpreadsheetModel {
         }
         rows = parsed
         columnCount = width
+        recomputeLineBreakColumns()
         recomputeDuplicates()
         onChange?()
     }
@@ -71,8 +75,39 @@ final class SpreadsheetModel {
         while lastCol > 0 && rows[0...lastRow].allSatisfy({ $0[lastCol].isEmpty }) { lastCol -= 1 }
 
         return rows[0...lastRow]
-            .map { $0[0...lastCol].joined(separator: "\t") }
+            .map { $0[0...lastCol].map(Self.encodeCell).joined(separator: "\t") }
             .joined(separator: "\n") + "\n"
+    }
+
+    // MARK: - Line breaks inside a cell
+
+    /// A file line is a row, so a line break inside a cell travels as the two
+    /// characters `\n`. Backslashes are otherwise left exactly as they were
+    /// written — nothing else in the file is rewritten on save, which is worth
+    /// more than being able to store a cell whose text is literally `\n`
+    /// (that one reads back as a line break).
+    static func decodeCell(_ cell: String) -> String {
+        cell.contains("\\n") ? cell.replacingOccurrences(of: "\\n", with: "\n") : cell
+    }
+
+    static func encodeCell(_ cell: String) -> String {
+        cell.contains("\n") ? cell.replacingOccurrences(of: "\n", with: "\\n") : cell
+    }
+
+    /// Columns that hold (or held, this session) a cell with a line break — the
+    /// only ones whose rows can need more than one line of height. A superset
+    /// is harmless: the row-height pass still checks each cell for a break, so
+    /// a stale entry costs a string scan and nothing else.
+    private(set) var columnsWithLineBreaks: Set<Int> = []
+
+    private func recomputeLineBreakColumns() {
+        var columns: Set<Int> = []
+        for row in rows {
+            for (column, value) in row.enumerated() where value.contains("\n") {
+                columns.insert(column)
+            }
+        }
+        columnsWithLineBreaks = columns
     }
 
     // MARK: - Cell access
@@ -210,6 +245,7 @@ final class SpreadsheetModel {
         let old = rows[row][column]
         guard old != newValue else { return }
         rows[row][column] = newValue
+        if newValue.contains("\n") { columnsWithLineBreaks.insert(column) }
         undoManager?.registerUndo(withTarget: self) { model in
             model.setValue(old, row: row, column: column)
         }
