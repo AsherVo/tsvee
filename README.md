@@ -61,6 +61,13 @@ bundle` app carries).
   tally a section without unfolding it.
 - **Frozen panes**: the field-name row and the ID column stay pinned while you
   scroll (both on by default; toggle in the View menu, persisted via `.tss`).
+- **Sticky section headers**: scroll into a section and its `#` header — along
+  with the `##` subheader inside it — pins itself under the column letters, so
+  what you're looking at always says what section it's in. The next header
+  climbing up from below pushes out the one it replaces. A pinned header keeps
+  its row number and disclosure triangle, so the section you're in folds from
+  where you already are, and arrow keys, Find and ID jumps all scroll far
+  enough to clear it.
 - **Fill handle**: drag the circle at the selection's bottom-right corner to
   autofill. A single cell copies; numeric runs continue the series (`1, 2 →
   3, 4`); IDs with trailing numbers increment and keep their zero-padding

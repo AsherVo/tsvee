@@ -145,6 +145,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// Collapsed header row → the last row it folds away. Derived alongside
     /// `hiddenRows`, and what lets a selection reach into a fold at its end.
     private var foldEnds: [Int: Int] = [:]
+    /// Every "#"/"##" row in the sheet, in order. Resolving which section the
+    /// top of the viewport is inside happens on every scroll, and this is what
+    /// keeps it from rescanning the sheet each time.
+    private var sectionHeaderRows: [Int] = []
 
     /// Columns hidden by the user (mirrors the `.tss` set). Like hidden rows
     /// these are zero-sized rather than skipped, so geometry, drawing and hit
@@ -328,6 +332,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         gridRows = model.rowCount + Metrics.phantomRows
         gridCols = model.columnCount + Metrics.phantomCols
         collapsedRows = format.collapsedSections
+        sectionHeaderRows = (0..<model.rowCount).filter {
+            SpreadsheetModel.sectionHeaderLevels.contains(model.headerLevel(ofRow: $0))
+        }
         // Column 0 and the phantom columns are never hideable, whatever a
         // hand-edited sidecar says.
         hiddenColumns = format.hiddenColumns.filter { $0 >= 1 && $0 < model.columnCount }
@@ -487,6 +494,168 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         SpreadsheetModel.encodeCell(model?.value(row: focus.row, column: focus.col) ?? "")
     }
 
+    // MARK: - Sticky section headers
+
+    /// A section header pinned below the top chrome: which row it is, where it
+    /// is drawn on screen, and the line it must not show above — the header it
+    /// is sliding up behind on its way out.
+    private struct StickyHeader {
+        let row: Int
+        let y: CGFloat
+        let height: CGFloat
+        let clipTop: CGFloat
+        /// The part of the row that is actually on show, once the header above
+        /// has clipped whatever has been pushed up behind it.
+        var visibleTop: CGFloat { max(y, clipTop) }
+        var visibleHeight: CGFloat { y + height - visibleTop }
+        func covers(y point: CGFloat) -> Bool { point >= visibleTop && point < y + height }
+    }
+
+    /// The section headers the top of the viewport is scrolled inside — the
+    /// "#" one, then the "##" one within it — pinned in that order under the
+    /// chrome, so the section you are in always names itself.
+    ///
+    /// Each slot resolves from the row showing at that slot's own position, so
+    /// a header climbing the screen takes a slot over exactly as it arrives at
+    /// it. The one arriving pushes out the pinned headers it replaces (its own
+    /// level and deeper), sliding them up behind the shallower ones, which stay.
+    private func stickyHeaders(vis: NSRect) -> [StickyHeader] {
+        guard let model, model.rowCount > 0 else { return [] }
+        let base = vis.minY + chromeTop
+        // Nothing to pin at the top of the sheet: every header is in its place.
+        guard base > yOffsets[frozenRowCount] + 0.5 else { return [] }
+
+        var rows: [Int] = []
+        var heights: [CGFloat] = []
+        var slotTop = base
+        for level in SpreadsheetModel.sectionHeaderLevels {
+            let probe = rowAt(min(max(slotTop, yOffsets[0]), yOffsets[gridRows] - 0.5))
+            guard probe < model.rowCount else { break }
+            guard let header = owningHeader(level: level, ofRow: probe, model: model),
+                  !hiddenRows.contains(header) else { continue }
+            let slotHeight = height(ofRow: header)
+            rows.append(header)
+            heights.append(slotHeight)
+            slotTop += slotHeight
+        }
+        guard let deepest = rows.last else { return [] }
+
+        let stackHeight = heights.reduce(0, +)
+        var retained = rows.count
+        var shift: CGFloat = 0
+        if let next = incomingSectionHeader(below: deepest,
+                                            between: base, and: base + stackHeight) {
+            let level = model.headerLevel(ofRow: next)
+            retained = rows.prefix { model.headerLevel(ofRow: $0) < level }.count
+            shift = base + stackHeight - yOffsets[next]
+        }
+
+        var stickies: [StickyHeader] = []
+        var y = base
+        var clipTop = base
+        for (i, row) in rows.enumerated() {
+            // Everything from here down is on its way out, behind the header
+            // above it.
+            if i == retained { clipTop = y }
+            stickies.append(StickyHeader(row: row, y: i < retained ? y : y - shift,
+                                         height: heights[i], clipTop: clipTop))
+            y += heights[i]
+        }
+        return stickies
+    }
+
+    /// The header of `level` whose section a row sits in: the nearest one at or
+    /// above it, unless a shallower header closed that section first.
+    private func owningHeader(level: Int, ofRow row: Int, model: SpreadsheetModel) -> Int? {
+        for header in sectionHeaderRows.reversed() where header <= row {
+            let headerLevel = model.headerLevel(ofRow: header)
+            if headerLevel < level { return nil }
+            if headerLevel == level { return header }
+        }
+        return nil
+    }
+
+    /// The section header on its way up into the pinned stack: the first one
+    /// below the deepest pinned header that has climbed into the band the stack
+    /// occupies. nil while the stack still has the top to itself.
+    private func incomingSectionHeader(below row: Int,
+                                       between top: CGFloat, and bottom: CGFloat) -> Int? {
+        for header in sectionHeaderRows where header > row && !hiddenRows.contains(header) {
+            guard yOffsets[header] > top else { continue }
+            return yOffsets[header] < bottom ? header : nil
+        }
+        return nil
+    }
+
+    /// How much pinned header would stand over a row scrolled to the top of the
+    /// body — the headroom a scroll has to leave it. A header row doesn't count
+    /// itself: it takes its own slot in the stack.
+    private func pinnedHeight(above row: Int) -> CGFloat {
+        guard let model, row < model.rowCount else { return 0 }
+        var total: CGFloat = 0
+        for level in SpreadsheetModel.sectionHeaderLevels {
+            guard let header = owningHeader(level: level, ofRow: row, model: model),
+                  header != row, !hiddenRows.contains(header) else { continue }
+            total += height(ofRow: header)
+        }
+        return total
+    }
+
+    /// Draws the pinned headers over the top of the body. An opaque backing
+    /// goes down first: the header tints are translucent, and the rows sliding
+    /// past underneath must not read through them.
+    private func drawStickyHeaders(_ stickies: [StickyHeader], vis: NSRect,
+                                   model: SpreadsheetModel, bodyCols: ClosedRange<Int>?) {
+        guard !stickies.isEmpty, let context = NSGraphicsContext.current else { return }
+        let cg = context.cgContext
+        var stackBottom: CGFloat?
+        for sticky in stickies {
+            guard sticky.visibleHeight > 0.5 else { continue }
+            let band = NSRect(x: vis.minX + Metrics.rowHeaderWidth, y: sticky.visibleTop,
+                              width: vis.width - Metrics.rowHeaderWidth,
+                              height: sticky.visibleHeight)
+            cg.saveGState()
+            cg.clip(to: band)
+            NSColor.textBackgroundColor.setFill()
+            band.fill()
+            cg.restoreGState()
+
+            // The row is drawn exactly as it would be in place, shifted up to
+            // the slot it has been pinned in.
+            let translateY = sticky.y - yOffsets[sticky.row]
+            if let bodyCols {
+                drawPane(model: model, rows: sticky.row...sticky.row, cols: bodyCols,
+                         translateX: 0, translateY: translateY,
+                         clip: NSRect(x: vis.minX + chromeLeft, y: band.minY,
+                                      width: vis.width - chromeLeft, height: band.height),
+                         selection: false)
+            }
+            if frozenColCount > 0 {
+                drawPane(model: model, rows: sticky.row...sticky.row, cols: 0...(frozenColCount - 1),
+                         translateX: vis.minX, translateY: translateY,
+                         clip: NSRect(x: vis.minX + Metrics.rowHeaderWidth, y: band.minY,
+                                      width: chromeLeft - Metrics.rowHeaderWidth, height: band.height),
+                         selection: false)
+            }
+            // The row itself is somewhere above; the tint is all the sign a
+            // selection reaching it can give down here.
+            if selectedRows.contains(sticky.row) {
+                let span = rectFor(rows: sticky.row...sticky.row, cols: selectedCols)
+                Palette.selectionFill.setFill()
+                NSRect(x: span.minX, y: band.minY, width: span.width, height: band.height)
+                    .intersection(band).fill()
+            }
+            stackBottom = max(stackBottom ?? band.maxY, band.maxY)
+        }
+        // A firm edge under the stack: it floats over the sheet, and the row it
+        // half covers should read as covered rather than cut off.
+        if let stackBottom {
+            Palette.paneEdge.setFill()
+            NSRect(x: vis.minX + Metrics.rowHeaderWidth, y: stackBottom - 1,
+                   width: vis.width - Metrics.rowHeaderWidth, height: 1).fill()
+        }
+    }
+
     // MARK: - Drawing
 
     override func draw(_ dirtyRect: NSRect) {
@@ -529,7 +698,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                                   width: chromeLeft - Metrics.rowHeaderWidth, height: chromeTop - Metrics.colHeaderHeight))
         }
 
-        drawChrome(vis: vis, model: model, bodyCols: bodyCols, bodyRows: bodyRows)
+        let pinned = stickyHeaders(vis: vis)
+        drawStickyHeaders(pinned, vis: vis, model: model, bodyCols: bodyCols)
+        drawChrome(vis: vis, model: model, bodyCols: bodyCols, bodyRows: bodyRows,
+                   pinnedHeaders: pinned)
         drawMoveIndicator(vis: vis)
     }
 
@@ -538,7 +710,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// translation and hard-clipped to the pane's viewport region.
     private func drawPane(model: SpreadsheetModel,
                           rows: ClosedRange<Int>, cols: ClosedRange<Int>,
-                          translateX: CGFloat, translateY: CGFloat, clip: NSRect) {
+                          translateX: CGFloat, translateY: CGFloat, clip: NSRect,
+                          selection: Bool = true) {
         guard clip.width > 0, clip.height > 0,
               let context = NSGraphicsContext.current else { return }
         let cg = context.cgContext
@@ -566,8 +739,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         // Selection fill.
-        Palette.selectionFill.setFill()
-        rectFor(rows: selectedRows, cols: selectedCols).fill()
+        if selection {
+            Palette.selectionFill.setFill()
+            rectFor(rows: selectedRows, cols: selectedCols).fill()
+        }
 
         // Grid lines.
         Palette.gridLine.setFill()
@@ -717,7 +892,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         // Selection border + fill handle (hidden while editing in-cell).
-        if editor == nil {
+        if selection, editor == nil {
             let rect = rectFor(rows: selectedRows, cols: selectedCols).insetBy(dx: 0.5, dy: 0.5)
             let path = NSBezierPath(rect: rect)
             path.lineWidth = 2
@@ -976,7 +1151,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     private func drawChrome(vis: NSRect, model: SpreadsheetModel,
-                            bodyCols: ClosedRange<Int>?, bodyRows: ClosedRange<Int>?) {
+                            bodyCols: ClosedRange<Int>?, bodyRows: ClosedRange<Int>?,
+                            pinnedHeaders: [StickyHeader]) {
         guard let context = NSGraphicsContext.current else { return }
         let cg = context.cgContext
         let headerH = Metrics.colHeaderHeight
@@ -1058,6 +1234,18 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             cg.clip(to: NSRect(x: vis.minX, y: vis.minY + chromeTop,
                                width: headerW, height: vis.height - chromeTop))
             for r in bodyRows { drawNumber(r, translateY: 0) }
+            cg.restoreGState()
+        }
+        // Pinned section headers bring their own number and triangle with them,
+        // so the strip names the row that is actually on show.
+        for sticky in pinnedHeaders where sticky.visibleHeight > 0.5 {
+            let band = NSRect(x: vis.minX, y: sticky.visibleTop,
+                              width: headerW, height: sticky.visibleHeight)
+            cg.saveGState()
+            cg.clip(to: band)
+            Palette.chromeBackground.setFill()
+            band.fill()
+            drawNumber(sticky.row, translateY: sticky.y - yOffsets[sticky.row])
             cg.restoreGState()
         }
         for r in 0..<frozenRowCount { drawNumber(r, translateY: vis.minY) }
@@ -1160,6 +1348,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func sectionToggleScreenRect(row: Int, vis: NSRect) -> NSRect? {
         guard let model, row < model.rowCount, !hiddenRows.contains(row),
               model.sectionBody(ofRow: row) != nil else { return nil }
+        if let pinned = stickyHeaders(vis: vis).first(where: { $0.row == row }) {
+            return NSRect(x: vis.minX, y: pinned.visibleTop,
+                          width: Metrics.toggleHitWidth, height: pinned.visibleHeight)
+        }
         let sticky = row < frozenRowCount ? vis.minY : 0
         return NSRect(x: vis.minX, y: yOffsets[row] + sticky,
                       width: Metrics.toggleHitWidth, height: height(ofRow: row))
@@ -1265,6 +1457,18 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 }
             }
             return .columnHeader(col: c, resizeEdgeOf: nil)
+        }
+        // A pinned section header stands in front of the row scrolled under
+        // it, in the number strip as much as in the sheet.
+        if let pinned = stickyHeaders(vis: vis).first(where: { $0.covers(y: p.y) }) {
+            if p.x < vis.minX + Metrics.rowHeaderWidth {
+                if let toggle = sectionToggleScreenRect(row: pinned.row, vis: vis),
+                   toggle.contains(p) {
+                    return .sectionToggle(row: pinned.row)
+                }
+                return .rowHeader(row: pinned.row)
+            }
+            return .cell(GridPos(row: pinned.row, col: columnAtScreenX(p.x, vis: vis)))
         }
         if p.x < vis.minX + Metrics.rowHeaderWidth {
             let r = rowAtScreenY(p.y, vis: vis)
@@ -1741,8 +1945,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             rect.origin.y = vis.minY
             rect.size.height = 1
         } else {
-            rect.origin.y -= chromeTop
-            rect.size.height += chromeTop
+            let headroom = chromeTop + pinnedHeight(above: pos.row)
+            rect.origin.y -= headroom
+            rect.size.height += headroom
         }
         scrollToVisible(rect)
     }
@@ -2156,6 +2361,27 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             affected += body.filter { model.sectionBody(ofRow: $0) != nil }
         }
         applySectionCollapse(rows: affected, collapsed: collapsed)
+        scrollSectionHeaderToTop(headerRow)
+    }
+
+    /// Brings a header up to the top of the body — under the chrome, and under
+    /// any header pinned above it, which is exactly the slot it was pinned in.
+    /// Folding a section from its pinned header would otherwise leave the
+    /// triangle you just clicked somewhere off the top of the sheet: this way
+    /// it stays under the cursor, ready to unfold what you just folded. A
+    /// header already on screen doesn't move — the scroll is the minimum one
+    /// that clears the chrome.
+    private func scrollSectionHeaderToTop(_ row: Int) {
+        guard let model, row < model.rowCount, !hiddenRows.contains(row) else { return }
+        let headroom = chromeTop + pinnedHeight(above: row)
+        var rect = cellRect(row, 0)
+        // Vertical only: folding a section is no reason to yank the view back
+        // to the ID column.
+        rect.origin.x = visibleRect.minX
+        rect.size.width = 1
+        rect.origin.y -= headroom
+        rect.size.height += headroom
+        scrollToVisible(rect)
     }
 
     private func applySectionCollapse(rows: [Int], collapsed: Bool) {
