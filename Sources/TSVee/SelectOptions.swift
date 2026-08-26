@@ -4,72 +4,23 @@ import AppKit
 ///
 /// `.list` sources carry their options inline. `.file` sources name another
 /// TSV by a path relative to this sheet; that sheet's row IDs are the options.
-/// If the named sheet is open, its live (possibly unsaved) model is used —
-/// including the sheet asking, which is how a self-referential column stays
-/// current — otherwise the file is read from disk and cached until its
-/// modification date changes.
 final class SelectOptionsResolver {
 
-    private var diskCache: [String: (modified: Date, ids: [String])] = [:]
+    private let loader: LinkedSheetLoader
+
+    init(loader: LinkedSheetLoader = LinkedSheetLoader()) {
+        self.loader = loader
+    }
 
     func options(for source: SelectSource, tsvURL: URL?) -> [String] {
         switch source {
         case .list(let options):
             return options
         case .file(let path):
-            guard let target = Self.resolve(path, relativeTo: tsvURL) else { return [] }
-            if let document = openDocument(at: target) {
-                return document.model.entryIDs()
-            }
-            return idsOnDisk(at: target)
+            guard let target = SheetPath.resolve(path, relativeTo: tsvURL),
+                  let model = loader.model(at: target) else { return [] }
+            return model.entryIDs()
         }
-    }
-
-    static func resolve(_ path: String, relativeTo tsvURL: URL?) -> URL? {
-        if path.hasPrefix("/") { return URL(fileURLWithPath: path).standardizedFileURL }
-        guard let base = tsvURL?.deletingLastPathComponent() else { return nil }
-        return URL(fileURLWithPath: path, relativeTo: base).standardizedFileURL
-    }
-
-    /// The path stored in the sidecar: relative wherever possible, so the two
-    /// sheets can move around together; absolute only when this sheet has
-    /// never been saved and there's nothing to be relative to.
-    static func storablePath(to target: URL, from tsvURL: URL?) -> String {
-        let targetParts = target.standardizedFileURL.pathComponents
-        guard let baseDir = tsvURL?.deletingLastPathComponent() else {
-            return target.standardizedFileURL.path
-        }
-        let baseParts = baseDir.standardizedFileURL.pathComponents
-        var common = 0
-        while common < min(targetParts.count, baseParts.count),
-              targetParts[common] == baseParts[common] { common += 1 }
-        let parts = Array(repeating: "..", count: baseParts.count - common) + targetParts[common...]
-        return parts.isEmpty ? target.lastPathComponent : parts.joined(separator: "/")
-    }
-
-    private func openDocument(at url: URL) -> TSVDocument? {
-        for case let document as TSVDocument in NSDocumentController.shared.documents
-        where document.fileURL?.standardizedFileURL == url {
-            return document
-        }
-        return nil
-    }
-
-    private func idsOnDisk(at url: URL) -> [String] {
-        let modified = (try? FileManager.default
-            .attributesOfItem(atPath: url.path)[.modificationDate] as? Date) ?? .distantPast
-        if let cached = diskCache[url.path], cached.modified == modified {
-            return cached.ids
-        }
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            diskCache[url.path] = nil
-            return []
-        }
-        let model = SpreadsheetModel()
-        model.load(tsv: text)
-        let ids = model.entryIDs()
-        diskCache[url.path] = (modified, ids)
-        return ids
     }
 }
 
@@ -111,7 +62,7 @@ enum SelectSourcePanel {
         private let fileRadio = NSButton(radioButtonWithTitle: "IDs from another sheet:",
                                          target: nil, action: nil)
         private let listField = NSTextField(string: "")
-        private let sheetPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+        private let sheetPopUp = SheetPopUpButton(frame: .zero, pullsDown: false)
         private let tsvURL: URL?
 
         init(existing: SelectSource?, suggested: [String], tsvURL: URL?) {
@@ -126,7 +77,9 @@ enum SelectSourcePanel {
             listField.placeholderString = "red, green, blue"
             listField.font = .systemFont(ofSize: 12)
 
-            populatePopUp(existing: existing)
+            var configuredPath: String?
+            if case .file(let path) = existing { configuredPath = path }
+            sheetPopUp.populate(tsvURL: tsvURL, preselecting: configuredPath)
 
             if case .list(let options) = existing {
                 listField.stringValue = options.joined(separator: ", ")
@@ -136,8 +89,7 @@ enum SelectSourcePanel {
                 // column of hand-typed values into a select needs no retyping.
                 listField.stringValue = suggested.joined(separator: ", ")
             }
-            var useFile = false
-            if case .file = existing { useFile = true }
+            let useFile = configuredPath != nil
             listRadio.state = useFile ? .off : .on
             fileRadio.state = useFile ? .on : .off
 
@@ -151,43 +103,6 @@ enum SelectSourcePanel {
             syncEnabledStates()
         }
 
-        /// Every open sheet that has a file (self included, so a column can
-        /// reference its own IDs), then "Other…" for navigating to one.
-        private func populatePopUp(existing: SelectSource?) {
-            let current = tsvURL?.standardizedFileURL
-            for case let document as TSVDocument in NSDocumentController.shared.documents {
-                guard let url = document.fileURL?.standardizedFileURL else { continue }
-                let name = document.displayName ?? url.lastPathComponent
-                let item = NSMenuItem(
-                    title: url == current ? "\(name) — this sheet" : name,
-                    action: nil, keyEquivalent: "")
-                item.representedObject = url
-                sheetPopUp.menu?.addItem(item)
-            }
-
-            // A configured file that isn't open gets its own entry, selected,
-            // so re-running the dialog shows (and keeps) the current source.
-            if case .file(let path) = existing {
-                let resolved = SelectOptionsResolver.resolve(path, relativeTo: tsvURL)
-                if let index = sheetPopUp.itemArray.firstIndex(where: {
-                    ($0.representedObject as? URL) == resolved
-                }) {
-                    sheetPopUp.selectItem(at: index)
-                } else if let resolved {
-                    let item = NSMenuItem(title: path, action: nil, keyEquivalent: "")
-                    item.representedObject = resolved
-                    sheetPopUp.menu?.insertItem(item, at: 0)
-                    sheetPopUp.selectItem(at: 0)
-                }
-            }
-
-            if sheetPopUp.numberOfItems > 0 { sheetPopUp.menu?.addItem(.separator()) }
-            let other = NSMenuItem(title: "Other…", action: #selector(chooseFile(_:)),
-                                   keyEquivalent: "")
-            other.target = self
-            sheetPopUp.menu?.addItem(other)
-        }
-
         @objc private func radioChanged(_ sender: NSButton) {
             listRadio.state = sender === listRadio ? .on : .off
             fileRadio.state = sender === fileRadio ? .on : .off
@@ -197,36 +112,6 @@ enum SelectSourcePanel {
         private func syncEnabledStates() {
             listField.isEnabled = listRadio.state == .on
             sheetPopUp.isEnabled = fileRadio.state == .on
-        }
-
-        /// The "Other…" pop-up item: navigate to a sheet anywhere on disk.
-        @objc private func chooseFile(_ sender: NSMenuItem) {
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = false
-            panel.allowsMultipleSelection = false
-            panel.directoryURL = tsvURL?.deletingLastPathComponent()
-            guard panel.runModal() == .OK, let url = panel.url else {
-                // Cancelled: put the selection back on a real sheet instead of
-                // leaving it sitting on "Other…".
-                if let index = sheetPopUp.itemArray.firstIndex(where: {
-                    $0.representedObject is URL
-                }) {
-                    sheetPopUp.selectItem(at: index)
-                }
-                return
-            }
-            let standardized = url.standardizedFileURL
-            if let index = sheetPopUp.itemArray.firstIndex(where: {
-                ($0.representedObject as? URL) == standardized
-            }) {
-                sheetPopUp.selectItem(at: index)
-            } else {
-                let item = NSMenuItem(title: standardized.lastPathComponent,
-                                      action: nil, keyEquivalent: "")
-                item.representedObject = standardized
-                sheetPopUp.menu?.insertItem(item, at: 0)
-                sheetPopUp.selectItem(at: 0)
-            }
         }
 
         /// What OK means, given the dialog's state. nil when the file radio is
@@ -240,8 +125,8 @@ enum SelectSourcePanel {
                     .filter { !$0.isEmpty && seen.insert($0).inserted }
                 return .list(options)
             }
-            guard let url = sheetPopUp.selectedItem?.representedObject as? URL else { return nil }
-            return .file(SelectOptionsResolver.storablePath(to: url, from: tsvURL))
+            guard let url = sheetPopUp.selectedSheet else { return nil }
+            return .file(SheetPath.storable(to: url, from: tsvURL))
         }
     }
 }

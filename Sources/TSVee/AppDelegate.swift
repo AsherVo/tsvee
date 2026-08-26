@@ -31,9 +31,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         DispatchQueue.main.async { window?.tabbingMode = .preferred }
     }
 
+    // MARK: - Sheet menu actions
+
+    /// Whether switching to another sheet lands on the entry the last one was
+    /// on. App-wide, so it lives here rather than on any one document.
+    @objc func toggleFollowCurrentID(_ sender: Any?) {
+        FollowState.shared.isEnabled.toggle()
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(saveAllDocuments(_:)) {
             return NSDocumentController.shared.documents.contains { $0.isDocumentEdited }
+        }
+        if menuItem.action == #selector(toggleFollowCurrentID(_:)) {
+            menuItem.state = FollowState.shared.isEnabled ? .on : .off
+            return true
         }
         return true
     }

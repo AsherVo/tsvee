@@ -171,6 +171,20 @@ Right-click a column (header or any cell) → **Column Data Type**:
   typing to narrow it, ⌫ to reject it, commit to accept it), and on a
   multi-select **comma confirms the suggestion** and starts the next option.
   Values the options don't cover are shown in red, never rewritten.
+- **Source** — the column is filled in from another sheet instead of typed.
+  Picking the type opens a dialog for **which sheet** (any open one, or a file
+  you navigate to, stored as a relative path) and **which of its fields**, by
+  name — so reordering columns over there doesn't silently re-point this one.
+  Rows are matched **by ID**: the row `slime_green` here shows the source
+  sheet's `slime_green` value of that field, and a row the source doesn't have
+  comes up empty. Mirrored cells are drawn a shade back from the rest and
+  can't be edited — typing, pasting, clearing and autofill all pass them by,
+  and the formula bar goes read-only over one — but the values are ordinary
+  text in this file, saved with it like any others. The mirror is re-read when
+  the sheet loads, whenever it changes, and when its window comes forward; if
+  the source sheet is open its live values are used. A source that can't be
+  read at all (renamed, or missing that field) leaves the saved values alone
+  rather than blanking the column.
 
 Types are per-column formatting, stored in the `.tss` sidecar, and they
 follow their column when you drag-reorder. Header (`#`) rows and the
@@ -181,8 +195,18 @@ fits the width to the longest cell (field name included).
 
 The same ID often lives in several files (stats in one, dialogue in
 another). Right-click a row — its header or any cell — and **Go to "id" In**
-lists every other open sheet containing that ID, with its row number.
+lists every other open sheet containing that ID, with its row number — in tab
+order, so the list reads the way the tab bar does rather than in whatever
+sequence the sheets were opened.
 Choosing one brings that sheet's window/tab forward and selects the row.
+
+**Sheet → Follow Current ID** (on by default) does the same thing without
+asking: switch to another sheet and it lands on the entry you were just on, if
+that sheet has it. Sheets that don't have the ID stay where they are, and
+nothing moves when the cursor is already on the right row — so coming back
+from another app leaves your cell selection alone — or when a cell is mid-edit.
+Only real entries count as somewhere to follow to: `#` headers, the field-name
+row and ID-less rows leave the last ID standing.
 
 ## Saving & tabs (Sublime-style)
 
@@ -192,8 +216,8 @@ window/tab title, plus the close-button dot) and prompt on close/quit.
 
 - **⌘S** Save · **⌥⇧⌘S** Save As… · **⇧⌘S** Save All (every sheet with
   pending changes)
-- Sheets open as **tabs** of the frontmost window (**⇧⌘[** / **⇧⌘]** to
-  switch). Drag a tab out — or use Window → Move Tab to New Window — to get
+- Sheets open as **tabs** of the frontmost window (**⌃⇥** / **⌃⇧⇥** to cycle
+  through them, or **⇧⌘[** / **⇧⌘]**). Drag a tab out — or use Window → Move Tab to New Window — to get
   an independent window with its own tab group; **⇧⌘N** opens a fresh
   standalone window. Window → Merge All Windows collects everything back
   into one.
@@ -211,18 +235,20 @@ v0 wire format — one tab-separated record per line:
 tss	0
 colwidth	<columnIndex>	<points>
 rowheight	<rowIndex>	<points>
-coltype	<columnIndex>	raw|integer|float|text|boolean|select|multiselect
+coltype	<columnIndex>	raw|integer|float|text|boolean|select|multiselect|source
 collapsed	<headerRowIndex>	1
 hiddencol	<columnIndex>	1
 freeze	fieldrow|idcol	0|1
 selectlist	<columnIndex>	<option>	<option>	…
 selectfile	<columnIndex>	<relative path to .tsv>
+sourcecol	<columnIndex>	<relative path to .tsv>	<field name>
 ```
 
 `select`/`multiselect` columns carry one extra record naming their options
 source: `selectlist` holds an ad-hoc option list (tab-separated, so any cell
 value is representable), `selectfile` points at the sheet whose IDs are the
-options, by a path relative to this file.
+options, by a path relative to this file. A `source` column carries
+`sourcecol`, naming the sheet it mirrors and the field of it to show.
 
 The UI writes column widths (drag-resize a column), column types, collapsed
 sections, hidden columns and the freeze toggles today; freeze records are only

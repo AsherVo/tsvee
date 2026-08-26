@@ -6,6 +6,10 @@ struct FindOptions: Equatable {
     /// Match only cells whose entire content equals the query, instead of
     /// any cell containing it.
     var wholeCell = false
+    /// Restrict matching to one column — nil searches every column. A column
+    /// scope also spares that column's field-name cell, since the name is a
+    /// label for the search, not something to search in.
+    var column: Int?
 }
 
 /// The raw TSV data: a rectangular grid of strings.
@@ -254,6 +258,30 @@ final class SpreadsheetModel {
         onChange?()
     }
 
+    /// Writes computed values into one column, without touching the undo
+    /// stack: a `source` column mirrors another sheet, so there is no earlier
+    /// state of it worth stepping back to — and an undo that put stale values
+    /// back would only be overwritten by the next refresh anyway. Returns
+    /// whether anything actually changed, so a sheet only goes dirty when the
+    /// mirror moved.
+    ///
+    /// Rows outside the grid, and columns past its width, are ignored: this
+    /// fills a column in, it doesn't grow the sheet to make room for one.
+    @discardableResult
+    func applyDerivedValues(_ values: [Int: String], column: Int) -> Bool {
+        guard column >= 0, column < columnCount else { return false }
+        var changed = false
+        for (row, value) in values where row >= 0 && row < rows.count {
+            guard rows[row][column] != value else { continue }
+            rows[row][column] = value
+            if value.contains("\n") { columnsWithLineBreaks.insert(column) }
+            changed = true
+        }
+        guard changed else { return false }
+        onChange?()
+        return true
+    }
+
     /// Grows the grid to contain the given size (used when editing the
     /// phantom cells past the end of the data). Undoable.
     func ensureSize(rows neededRows: Int, columns neededColumns: Int) {
@@ -467,25 +495,36 @@ final class SpreadsheetModel {
         return value.replacingOccurrences(of: query, with: replacement, options: compareOptions)
     }
 
+    /// The cells the options let a search touch: the whole grid, or — when the
+    /// options name a column — that column without its field-name cell.
+    private func searchArea(_ options: FindOptions) -> (rows: Range<Int>, columns: Range<Int>) {
+        guard let column = options.column else { return (rows.indices, 0..<columnCount) }
+        guard column >= 0, column < columnCount else { return (0..<0, 0..<0) }
+        let firstRow = hasFieldNameRow ? 1 : 0
+        return (min(firstRow, rowCount)..<rowCount, column..<(column + 1))
+    }
+
     /// Every matching cell, in reading order (row-major).
     func findMatches(_ query: String, options: FindOptions) -> [(row: Int, column: Int)] {
         guard !query.isEmpty else { return [] }
+        let area = searchArea(options)
         var matches: [(row: Int, column: Int)] = []
-        for r in rows.indices {
-            for c in 0..<columnCount where Self.value(rows[r][c], matches: query, options: options) {
+        for r in area.rows {
+            for c in area.columns where Self.value(rows[r][c], matches: query, options: options) {
                 matches.append((r, c))
             }
         }
         return matches
     }
 
-    /// Replaces every match in the sheet as a single undo step. Returns the
-    /// number of cells that changed.
+    /// Replaces every match the options reach as a single undo step. Returns
+    /// the number of cells that changed.
     @discardableResult
     func replaceAll(_ query: String, with replacement: String, options: FindOptions) -> Int {
+        let area = searchArea(options)
         var changes: [(row: Int, column: Int, value: String)] = []
-        for r in rows.indices {
-            for c in 0..<columnCount {
+        for r in area.rows {
+            for c in area.columns {
                 if let updated = Self.replacing(rows[r][c], query: query, with: replacement,
                                                 options: options),
                    updated != rows[r][c] {

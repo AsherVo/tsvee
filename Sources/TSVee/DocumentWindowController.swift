@@ -33,6 +33,10 @@ final class DocumentWindowController: NSWindowController {
             document.noteFormatChanged()
         }
         spreadsheetView.documentURLProvider = { [weak document] in document?.fileURL }
+        // Values a `source` column mirrored in aren't in the file yet.
+        spreadsheetView.onDerivedDataChanged = { [weak document] in
+            document?.updateChangeCount(.changeDone)
+        }
         spreadsheetView.model = document.model
 
         let scrollView = NSScrollView()
@@ -128,6 +132,7 @@ final class DocumentWindowController: NSWindowController {
 
         spreadsheetView.onSelectionChange = { [weak self] in
             self?.refreshFormulaBar()
+            self?.noteCurrentID()
         }
 
         formulaBar.onCommit = { [weak self] text in
@@ -152,6 +157,44 @@ final class DocumentWindowController: NSWindowController {
 
     @objc private func windowBecameKey(_ notification: Notification) {
         (document as? TSVDocument)?.reconcileWithDiskIfNeeded(confirmingIn: window)
+        // The sheets this one links to may have moved on too, and they're read
+        // straight from disk rather than through a document of their own.
+        spreadsheetView.refreshLinkedSheets()
+        // Last, so it lands in whatever rows the two steps above settled on.
+        followCurrentID()
+    }
+
+    // MARK: - Cross-sheet ID following
+
+    /// Remembers the focused row's ID, for the sheet the user switches to
+    /// next. Only while this window is the one being driven: a sheet updating
+    /// itself in the background must not redirect where everything else looks.
+    private func noteCurrentID() {
+        guard window?.isKeyWindow == true, let model = spreadsheetView.model else { return }
+        let row = spreadsheetView.focusedCell.row
+        guard row < model.rowCount, model.headerLevel(ofRow: row) == 0,
+              !model.isFieldNameRow(row) else { return }
+        let id = model.value(row: row, column: 0)
+        guard !id.isEmpty else { return }
+        FollowState.shared.currentID = id
+    }
+
+    /// Arriving at this sheet lands on the entry the last one was on, exactly
+    /// as picking it out of the "Go to" menu would — collapsed sections
+    /// unfolded, whole row selected.
+    ///
+    /// Silent when there's nothing worth doing: following is off, the ID isn't
+    /// in this sheet, the cursor is already on it (following would flatten a
+    /// cell selection into a whole-row one for nothing — which is every time
+    /// you switch back from another app), or a cell is mid-edit and moving the
+    /// selection would strand the editor.
+    private func followCurrentID() {
+        guard FollowState.shared.isEnabled, !isEditingCell,
+              let id = FollowState.shared.currentID,
+              let model = spreadsheetView.model,
+              model.value(row: spreadsheetView.focusedCell.row, column: 0) != id,
+              let row = model.firstRow(withID: id) else { return }
+        spreadsheetView.selectRowAndReveal(row)
     }
 
     /// True while a cell's in-place editor is open with text in it.
@@ -167,7 +210,9 @@ final class DocumentWindowController: NSWindowController {
     // MARK: - Find & replace (menu actions arrive via the responder chain)
 
     /// ⌘F: find in this sheet. ⇧⌘F: find across all open sheets. Either way
-    /// the scope stays visible (and changeable) in the bar's popup.
+    /// the scope stays visible (and changeable) in the bar's popup, which also
+    /// offers this sheet's individual columns. ⌘F leaves a column scope alone
+    /// (it already searches only this sheet); ⇧⌘F widens past it.
     @objc func showFindBar(_ sender: Any?) {
         FindState.shared.allSheets = false
         showFindBar(takeFocus: true)
@@ -175,6 +220,7 @@ final class DocumentWindowController: NSWindowController {
 
     @objc func showFindBarAllSheets(_ sender: Any?) {
         FindState.shared.allSheets = true
+        FindState.shared.column = nil
         showFindBar(takeFocus: true)
     }
 
@@ -248,6 +294,7 @@ final class DocumentWindowController: NSWindowController {
         formulaBar.update(
             cellName: spreadsheetView.focusedCellName(),
             content: spreadsheetView.focusedCellValue(),
+            editable: spreadsheetView.focusedCellIsEditable,
             duplicateCount: model.duplicateIDRows.count,
             tally: spreadsheetView.selectionTally())
     }

@@ -339,6 +339,41 @@ final class SpreadsheetModelTests: XCTestCase {
     }
 }
 
+final class DerivedValueTests: XCTestCase {
+
+    private func makeModel() -> SpreadsheetModel {
+        let model = SpreadsheetModel()
+        model.load(tsv: "ID\tName\tHP\nslime\tSlime\t\nbat\tBat\t\n")
+        return model
+    }
+
+    func testWritesValuesAndReportsWhetherAnythingMoved() {
+        let model = makeModel()
+        XCTAssertTrue(model.applyDerivedValues([1: "10", 2: "6"], column: 2))
+        XCTAssertEqual(model.value(row: 1, column: 2), "10")
+        XCTAssertEqual(model.value(row: 2, column: 2), "6")
+        // Idempotent: writing the same mirror again isn't a change to save.
+        XCTAssertFalse(model.applyDerivedValues([1: "10", 2: "6"], column: 2))
+    }
+
+    /// A mirror is not something to step back through: undoing to a stale
+    /// value would only be overwritten by the next refresh.
+    func testDoesNotRegisterUndo() {
+        let model = makeModel()
+        let undoManager = UndoManager()
+        model.undoManager = undoManager
+        model.applyDerivedValues([1: "10"], column: 2)
+        XCTAssertFalse(undoManager.canUndo)
+    }
+
+    func testIgnoresRowsAndColumnsOutsideTheGrid() {
+        let model = makeModel()
+        XCTAssertFalse(model.applyDerivedValues([1: "10"], column: 9))
+        XCTAssertTrue(model.applyDerivedValues([1: "10", 99: "x"], column: 2))
+        XCTAssertEqual(model.rowCount, 3)
+    }
+}
+
 final class TSSFormatTests: XCTestCase {
 
     func testParseAndSerializeRoundTrip() {
@@ -380,6 +415,76 @@ final class TSSFormatTests: XCTestCase {
         XCTAssertTrue(out.contains("selectfile\t3\t../shared/enemies.tsv"))
         XCTAssertTrue(format.hasCustomFormatting)
     }
+
+    func testSourceRecordsRoundTrip() {
+        let text = "coltype\t4\tsource\nsourcecol\t4\t../shared/enemies.tsv\tHP\n"
+        let format = TSSFormat.parse(text)
+        XCTAssertEqual(format.columnTypes[4], .source)
+        XCTAssertEqual(format.sourceSpecs[4],
+                       SourceSpec(path: "../shared/enemies.tsv", field: "HP"))
+        XCTAssertTrue(format.serialize().contains("sourcecol\t4\t../shared/enemies.tsv\tHP"))
+        XCTAssertTrue(format.hasCustomFormatting)
+    }
+
+    func testSourceRecordNeedsBothPathAndField() {
+        XCTAssertTrue(TSSFormat.parse("sourcecol\t4\t\tHP\n").sourceSpecs.isEmpty)
+        XCTAssertTrue(TSSFormat.parse("sourcecol\t4\tenemies.tsv\t\n").sourceSpecs.isEmpty)
+        XCTAssertTrue(TSSFormat.parse("sourcecol\t4\tenemies.tsv\n").sourceSpecs.isEmpty)
+    }
+}
+
+final class SourceColumnResolverTests: XCTestCase {
+
+    /// Writes `enemies.tsv` into a scratch directory and returns the sheet
+    /// path a neighbouring `heroes.tsv` would resolve against.
+    private func makeSourceSheet(_ tsv: String,
+                                 file: StaticString = #filePath,
+                                 line: UInt = #line) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsvee-source-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        try tsv.write(to: dir.appendingPathComponent("enemies.tsv"),
+                      atomically: true, encoding: .utf8)
+        return dir.appendingPathComponent("heroes.tsv")
+    }
+
+    func testValuesAreKeyedByID() throws {
+        let heroes = try makeSourceSheet(
+            "ID\tName\tHP\n# Bosses\t\t\nslime\tSlime\t10\nbat\tBat\t6\n\tno id\t99\n")
+        let values = SourceColumnResolver().values(
+            for: SourceSpec(path: "enemies.tsv", field: "HP"), tsvURL: heroes)
+        XCTAssertEqual(values, ["slime": "10", "bat": "6"])
+    }
+
+    func testFirstRowWinsOnDuplicateIDs() throws {
+        let heroes = try makeSourceSheet("ID\tHP\nslime\t10\nslime\t20\n")
+        let values = SourceColumnResolver().values(
+            for: SourceSpec(path: "enemies.tsv", field: "HP"), tsvURL: heroes)
+        XCTAssertEqual(values, ["slime": "10"])
+    }
+
+    /// nil, not empty: the caller must be able to tell "nothing to mirror" from
+    /// "the source says this row is blank", or a broken link wipes real data.
+    func testNothingToMirrorIsNilRatherThanEmpty() throws {
+        let heroes = try makeSourceSheet("ID\tHP\nslime\t10\n")
+        let resolver = SourceColumnResolver()
+        XCTAssertNil(resolver.values(for: SourceSpec(path: "missing.tsv", field: "HP"),
+                                     tsvURL: heroes))
+        XCTAssertNil(resolver.values(for: SourceSpec(path: "enemies.tsv", field: "Attack"),
+                                     tsvURL: heroes))
+        // No field-name row over there means no field to name.
+        let unnamed = try makeSourceSheet("slime\t10\n")
+        XCTAssertNil(resolver.values(for: SourceSpec(path: "enemies.tsv", field: "HP"),
+                                     tsvURL: unnamed))
+    }
+
+    func testFieldNamesSkipTheIDColumnAndBlanks() throws {
+        let heroes = try makeSourceSheet("ID\tName\t\tHP\tName\nslime\tSlime\t\t10\tx\n")
+        let names = SourceColumnResolver().fieldNames(
+            at: heroes.deletingLastPathComponent().appendingPathComponent("enemies.tsv"))
+        XCTAssertEqual(names, ["Name", "HP"])
+    }
 }
 
 final class SelectCellTests: XCTestCase {
@@ -415,38 +520,41 @@ final class SelectCellTests: XCTestCase {
     }
 }
 
-final class SelectOptionsResolverTests: XCTestCase {
+final class SheetPathTests: XCTestCase {
 
     func testResolveRelativeAndAbsolutePaths() {
         let base = URL(fileURLWithPath: "/data/sheets/heroes.tsv")
-        XCTAssertEqual(SelectOptionsResolver.resolve("enemies.tsv", relativeTo: base)?.path,
+        XCTAssertEqual(SheetPath.resolve("enemies.tsv", relativeTo: base)?.path,
                        "/data/sheets/enemies.tsv")
-        XCTAssertEqual(SelectOptionsResolver.resolve("../shared/items.tsv", relativeTo: base)?.path,
+        XCTAssertEqual(SheetPath.resolve("../shared/items.tsv", relativeTo: base)?.path,
                        "/data/shared/items.tsv")
-        XCTAssertEqual(SelectOptionsResolver.resolve("/abs/items.tsv", relativeTo: base)?.path,
+        XCTAssertEqual(SheetPath.resolve("/abs/items.tsv", relativeTo: base)?.path,
                        "/abs/items.tsv")
         // A never-saved sheet has no base to resolve a relative path against.
-        XCTAssertNil(SelectOptionsResolver.resolve("enemies.tsv", relativeTo: nil))
-        XCTAssertEqual(SelectOptionsResolver.resolve("/abs/items.tsv", relativeTo: nil)?.path,
+        XCTAssertNil(SheetPath.resolve("enemies.tsv", relativeTo: nil))
+        XCTAssertEqual(SheetPath.resolve("/abs/items.tsv", relativeTo: nil)?.path,
                        "/abs/items.tsv")
     }
 
     func testStorablePathPrefersRelative() {
         let base = URL(fileURLWithPath: "/data/sheets/heroes.tsv")
-        XCTAssertEqual(SelectOptionsResolver.storablePath(
+        XCTAssertEqual(SheetPath.storable(
             to: URL(fileURLWithPath: "/data/sheets/enemies.tsv"), from: base),
             "enemies.tsv")
-        XCTAssertEqual(SelectOptionsResolver.storablePath(
+        XCTAssertEqual(SheetPath.storable(
             to: URL(fileURLWithPath: "/data/shared/items.tsv"), from: base),
             "../shared/items.tsv")
         // Self-reference: the sheet using its own IDs stores its own name.
-        XCTAssertEqual(SelectOptionsResolver.storablePath(
+        XCTAssertEqual(SheetPath.storable(
             to: URL(fileURLWithPath: "/data/sheets/heroes.tsv"), from: base),
             "heroes.tsv")
-        XCTAssertEqual(SelectOptionsResolver.storablePath(
+        XCTAssertEqual(SheetPath.storable(
             to: URL(fileURLWithPath: "/data/sheets/items.tsv"), from: nil),
             "/data/sheets/items.tsv")
     }
+}
+
+final class SelectOptionsResolverTests: XCTestCase {
 
     func testFileSourceReadsIDsFromDisk() throws {
         let dir = FileManager.default.temporaryDirectory
@@ -549,6 +657,46 @@ final class FindReplaceTests: XCTestCase {
         let model = makeModel("a\tb")
         XCTAssertEqual(model.replaceAll("zzz", with: "x", options: FindOptions()), 0)
         XCTAssertEqual(model.value(row: 0, column: 0), "a")
+    }
+
+    func testColumnScopeLimitsMatchesAndSkipsTheFieldName() {
+        let model = makeModel("ID\tName\tNotes\nslime_red\tRed Slime\tslime nearby\nbat\tBat\tName")
+        let scoped = model.findMatches("slime", options: FindOptions(column: 1))
+        XCTAssertEqual(scoped.map { [$0.row, $0.column] }, [[1, 1]])
+
+        // The column's own name is a label for the search, not part of it —
+        // but the same word elsewhere in the column still matches.
+        XCTAssertTrue(model.findMatches("Name", options: FindOptions(column: 1)).isEmpty)
+        XCTAssertEqual(model.findMatches("Name", options: FindOptions(column: 2))
+            .map { [$0.row, $0.column] }, [[2, 2]])
+    }
+
+    func testColumnScopeSearchesTheFieldRowWhenThereIsNoFieldNameRow() {
+        let model = makeModel("a\tslime\nb\tbat")
+        XCTAssertEqual(model.findMatches("slime", options: FindOptions(column: 1))
+            .map { [$0.row, $0.column] }, [[0, 1]])
+    }
+
+    func testColumnScopeOutOfRangeMatchesNothing() {
+        let model = makeModel("ID\tName\nslime_red\tRed Slime")
+        XCTAssertTrue(model.findMatches("slime", options: FindOptions(column: 7)).isEmpty)
+        XCTAssertEqual(model.replaceAll("slime", with: "bat", options: FindOptions(column: 7)), 0)
+        XCTAssertEqual(model.value(row: 1, column: 0), "slime_red")
+    }
+
+    func testReplaceAllHonoursTheColumnScope() {
+        let model = makeModel("ID\tName\nslime_red\tRed Slime\nslime_blue\tBlue Slime")
+        XCTAssertEqual(model.replaceAll("slime", with: "goblin", options: FindOptions(column: 1)), 2)
+        XCTAssertEqual(model.value(row: 1, column: 0), "slime_red")
+        XCTAssertEqual(model.value(row: 1, column: 1), "Red goblin")
+        XCTAssertEqual(model.value(row: 2, column: 1), "Blue goblin")
+    }
+
+    func testReplaceAllInAColumnLeavesTheFieldNameAlone() {
+        let model = makeModel("ID\tName\na\tName")
+        XCTAssertEqual(model.replaceAll("Name", with: "Title", options: FindOptions(column: 1)), 1)
+        XCTAssertEqual(model.value(row: 0, column: 1), "Name")
+        XCTAssertEqual(model.value(row: 1, column: 1), "Title")
     }
 }
 

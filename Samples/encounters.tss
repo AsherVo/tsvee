@@ -1,0 +1,5 @@
+tss	0
+colwidth	1	140
+coltype	2	source
+coltype	3	integer
+sourcecol	2	enemies.tsv	HP

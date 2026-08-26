@@ -10,13 +10,18 @@ final class FindState {
     var caseSensitive = false
     var wholeCell = false
     var allSheets = false
-    var options: FindOptions { FindOptions(caseSensitive: caseSensitive, wholeCell: wholeCell) }
+    /// Column index the search is narrowed to, nil for the whole sheet. A
+    /// column belongs to one sheet, so this and `allSheets` never both apply.
+    var column: Int?
+    var options: FindOptions {
+        FindOptions(caseSensitive: caseSensitive, wholeCell: wholeCell, column: column)
+    }
 }
 
 /// Find & replace bar docked at the bottom of each document window (never a
-/// blocking panel). ⌘F shows it, Esc hides it. Scope is either the sheet it
-/// lives in or every open sheet; cross-sheet matches bring the other sheet's
-/// window (or tab) forward.
+/// blocking panel). ⌘F shows it, Esc hides it. Scope is the sheet it lives
+/// in, one of that sheet's columns, or every open sheet; cross-sheet matches
+/// bring the other sheet's window (or tab) forward.
 final class FindBarView: NSView, NSSearchFieldDelegate {
 
     static let barHeight: CGFloat = 66
@@ -57,11 +62,11 @@ final class FindBarView: NSView, NSSearchFieldDelegate {
         matchLabel.lineBreakMode = .byTruncatingTail
         matchLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        scopePopup.addItems(withTitles: ["This Sheet", "All Open Sheets"])
         scopePopup.controlSize = .small
         scopePopup.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         scopePopup.target = self
         scopePopup.action = #selector(optionsChanged)
+        rebuildScopePopup()
 
         for checkbox in [caseCheckbox, wholeCellCheckbox] {
             checkbox.controlSize = .small
@@ -115,6 +120,8 @@ final class FindBarView: NSView, NSSearchFieldDelegate {
             replaceRow.topAnchor.constraint(equalTo: findRow.bottomAnchor, constant: 6),
             replaceRow.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
             replaceField.widthAnchor.constraint(equalTo: searchField.widthAnchor),
+            // A long field name shouldn't crowd out the search field.
+            scopePopup.widthAnchor.constraint(lessThanOrEqualToConstant: 180),
         ])
     }
 
@@ -137,7 +144,7 @@ final class FindBarView: NSView, NSSearchFieldDelegate {
         replaceField.stringValue = state.replacement
         caseCheckbox.state = state.caseSensitive ? .on : .off
         wholeCellCheckbox.state = state.wholeCell ? .on : .off
-        scopePopup.selectItem(at: state.allSheets ? 1 : 0)
+        rebuildScopePopup()
         updateMatchCount()
     }
 
@@ -168,6 +175,7 @@ final class FindBarView: NSView, NSSearchFieldDelegate {
     /// The grid changed under us (edits, undo, replace in another window).
     func noteModelChanged() {
         guard !isHidden else { return }
+        rebuildScopePopup()
         updateMatchCount()
     }
 
@@ -185,8 +193,71 @@ final class FindBarView: NSView, NSSearchFieldDelegate {
         let state = FindState.shared
         state.caseSensitive = caseCheckbox.state == .on
         state.wholeCell = wholeCellCheckbox.state == .on
-        state.allSheets = scopePopup.indexOfSelectedItem == 1
+        let tag = scopePopup.selectedItem?.tag ?? ScopeTag.thisSheet
+        state.allSheets = tag == ScopeTag.allSheets
+        state.column = tag >= 0 ? tag : nil
         updateMatchCount()
+    }
+
+    // MARK: - Scope popup
+
+    private enum ScopeTag {
+        static let thisSheet = -1
+        static let allSheets = -2
+    }
+
+    /// The scope menu: the two sheet-wide scopes, then one item per column of
+    /// this sheet, tagged with its index. Built by hand rather than with
+    /// `addItems(withTitles:)`, which drops duplicate titles — two columns can
+    /// share a field name.
+    private func rebuildScopePopup() {
+        guard let menu = scopePopup.menu else { return }
+        menu.removeAllItems()
+        menu.addItem(scopeItem("This Sheet", tag: ScopeTag.thisSheet))
+        menu.addItem(scopeItem("All Open Sheets", tag: ScopeTag.allSheets))
+        let names = columnNames()
+        if !names.isEmpty {
+            menu.addItem(.separator())
+            for (index, name) in names.enumerated() {
+                menu.addItem(scopeItem(name, tag: index))
+            }
+        }
+        syncScopeSelection()
+    }
+
+    private func scopeItem(_ title: String, tag: Int) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.tag = tag
+        return item
+    }
+
+    /// How each column reads in the menu: its field name where the sheet has
+    /// one, else the column letter.
+    private func columnNames() -> [String] {
+        guard let model = ownDocument?()?.model else { return [] }
+        return (0..<model.columnCount).map { column in
+            let name = model.hasFieldNameRow
+                ? model.value(row: 0, column: column).trimmingCharacters(in: .whitespaces)
+                : ""
+            guard !name.isEmpty else {
+                return "Column " + SpreadsheetView.columnLetters(column)
+            }
+            return name.count > 28 ? String(name.prefix(27)) + "…" : name
+        }
+    }
+
+    /// Points the popup at the stored scope. A column scope carried over from
+    /// a sheet with more columns can't apply here, so it falls back to the
+    /// whole sheet.
+    private func syncScopeSelection() {
+        let state = FindState.shared
+        let wanted = state.column ?? (state.allSheets ? ScopeTag.allSheets : ScopeTag.thisSheet)
+        if let item = scopePopup.menu?.items.first(where: { !$0.isSeparatorItem && $0.tag == wanted }) {
+            scopePopup.select(item)
+        } else {
+            state.column = nil
+            scopePopup.selectItem(at: state.allSheets ? 1 : 0)
+        }
     }
 
     // MARK: - Searching
@@ -290,8 +361,13 @@ final class FindBarView: NSView, NSSearchFieldDelegate {
         let state = FindState.shared
         guard !state.query.isEmpty, let document = ownDocument?() else { NSSound.beep(); return }
         let pos = ownFocusedCell?() ?? GridPos(row: 0, col: 0)
+        // A cell the scope excludes is a cell the search would never land on,
+        // so leave it be and just move to the next real match.
+        let inScope = state.column == nil
+            || (pos.col == state.column && !document.model.isFieldNameRow(pos.row))
         let value = document.model.value(row: pos.row, column: pos.col)
-        if let updated = SpreadsheetModel.replacing(value, query: state.query,
+        if inScope,
+           let updated = SpreadsheetModel.replacing(value, query: state.query,
                                                     with: state.replacement,
                                                     options: state.options) {
             document.model.setValue(updated, row: pos.row, column: pos.col)

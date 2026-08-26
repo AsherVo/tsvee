@@ -154,6 +154,9 @@ enum MainMenu {
         let jump = menu.addItem(withTitle: "Jump to Next Duplicate ID",
                                 action: NSSelectorFromString("jumpToNextDuplicateID:"), keyEquivalent: "d")
         jump.keyEquivalentModifierMask = [.command, .shift]
+        // App-wide rather than per-sheet, so it's handled by the app delegate.
+        menu.addItem(withTitle: "Follow Current ID",
+                     action: NSSelectorFromString("toggleFollowCurrentID:"), keyEquivalent: "")
         return menu
     }
 
@@ -162,12 +165,17 @@ enum MainMenu {
         menu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         menu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         menu.addItem(.separator())
+        // ⌃⇥ / ⌃⇧⇥ cycle the tabs, the way they do in Safari. The older
+        // ⇧⌘[ / ⇧⌘] keep working too — a menu item can only advertise one
+        // shortcut, so those are picked up in `SpreadsheetView`.
         let previousTab = menu.addItem(withTitle: "Show Previous Tab",
-                                       action: #selector(NSWindow.selectPreviousTab(_:)), keyEquivalent: "[")
-        previousTab.keyEquivalentModifierMask = [.command, .shift]
+                                       action: #selector(NSWindow.selectPreviousTab(_:)),
+                                       keyEquivalent: "\t")
+        previousTab.keyEquivalentModifierMask = [.control, .shift]
         let nextTab = menu.addItem(withTitle: "Show Next Tab",
-                                   action: #selector(NSWindow.selectNextTab(_:)), keyEquivalent: "]")
-        nextTab.keyEquivalentModifierMask = [.command, .shift]
+                                   action: #selector(NSWindow.selectNextTab(_:)),
+                                   keyEquivalent: "\t")
+        nextTab.keyEquivalentModifierMask = .control
         menu.addItem(withTitle: "Move Tab to New Window",
                      action: #selector(NSWindow.moveTabToNewWindow(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Merge All Windows",

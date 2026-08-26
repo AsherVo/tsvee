@@ -84,12 +84,17 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func update(cellName: String, content: String, duplicateCount: Int,
-                tally: SelectionTally?) {
+    /// `editable` is false over a cell nothing can be typed into — a `source`
+    /// column's, mirrored from another sheet. The bar still shows the value;
+    /// it just won't pretend the value is yours to change.
+    func update(cellName: String, content: String, editable: Bool,
+                duplicateCount: Int, tally: SelectionTally?) {
         nameBox.stringValue = cellName
         if contentField.currentEditor() == nil {
             contentField.stringValue = content
         }
+        contentField.isEditable = editable
+        contentField.textColor = editable ? .labelColor : .secondaryLabelColor
         if let tally {
             tallyLabel.stringValue = tally.idsOnly
                 ? "\(tally.populated) entr\(tally.populated == 1 ? "y" : "ies")"

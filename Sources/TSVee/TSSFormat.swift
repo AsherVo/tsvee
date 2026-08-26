@@ -16,6 +16,7 @@ import Foundation
 ///     hiddencol	<columnIndex>	1
 ///     selectlist	<columnIndex>	<option>	<option>	…
 ///     selectfile	<columnIndex>	<relative path to .tsv>
+///     sourcecol	<columnIndex>	<relative path to .tsv>	<field name>
 ///
 /// TODO(tss): cell styles (font/color/alignment), merged headers, calculated
 /// columns. Add new record types here; unknown records are preserved verbatim.
@@ -28,6 +29,7 @@ enum ColumnType: String {
     case boolean
     case select
     case multiselect
+    case source
 }
 
 /// Where a `select` / `multiselect` column's allowed options come from: an
@@ -36,6 +38,17 @@ enum ColumnType: String {
 enum SelectSource: Equatable {
     case list([String])
     case file(String)
+}
+
+/// Where a `source` column's values come from: a named field of another sheet,
+/// matched up row for row by ID. The path is relative to this file for the
+/// same reason a `selectfile` path is — so the sheets can move together.
+struct SourceSpec: Equatable {
+    var path: String
+    /// The source sheet's field name for the column to mirror, as it reads in
+    /// that sheet's field-name row. Stored by name rather than by index so
+    /// reordering columns over there doesn't silently re-point this one.
+    var field: String
 }
 
 /// What a `boolean` cell holds. The file only ever carries `TRUE`/`FALSE` —
@@ -88,6 +101,9 @@ struct TSSFormat {
     /// Option sources for `select` / `multiselect` columns.
     var selectSources: [Int: SelectSource] = [:]
 
+    /// Where `source` columns mirror their values from.
+    var sourceSpecs: [Int: SourceSpec] = [:]
+
     /// Header rows whose sections are collapsed. Entries for rows that are no
     /// longer headers are inert (and pruned on the next toggle), so an edited-
     /// away "#" can never strand its rows out of sight.
@@ -106,7 +122,7 @@ struct TSSFormat {
 
     var hasCustomFormatting: Bool {
         !columnWidths.isEmpty || !rowHeights.isEmpty || !columnTypes.isEmpty
-            || !selectSources.isEmpty || !collapsedSections.isEmpty
+            || !selectSources.isEmpty || !sourceSpecs.isEmpty || !collapsedSections.isEmpty
             || !hiddenColumns.isEmpty
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
@@ -121,12 +137,14 @@ struct TSSFormat {
     struct SubstantiveContent: Equatable {
         var columnTypes: [Int: ColumnType]
         var selectSources: [Int: SelectSource]
+        var sourceSpecs: [Int: SourceSpec]
         var unknownRecords: [String]
     }
 
     var substantiveContent: SubstantiveContent {
         SubstantiveContent(columnTypes: columnTypes,
                            selectSources: selectSources,
+                           sourceSpecs: sourceSpecs,
                            unknownRecords: unknownRecords)
     }
 
@@ -174,6 +192,10 @@ struct TSSFormat {
                 if let index = Int(fields[1]), !fields[2].isEmpty {
                     format.selectSources[index] = .file(fields[2])
                 }
+            case "sourcecol" where fields.count >= 4:
+                if let index = Int(fields[1]), !fields[2].isEmpty, !fields[3].isEmpty {
+                    format.sourceSpecs[index] = SourceSpec(path: fields[2], field: fields[3])
+                }
             case "collapsed" where fields.count >= 3:
                 if let index = Int(fields[1]), index >= 0, fields[2] != "0" {
                     format.collapsedSections.insert(index)
@@ -215,6 +237,9 @@ struct TSSFormat {
             case .file(let path):
                 lines.append("selectfile\t\(index)\t\(path)")
             }
+        }
+        for (index, spec) in sourceSpecs.sorted(by: { $0.key < $1.key }) {
+            lines.append("sourcecol\t\(index)\t\(spec.path)\t\(spec.field)")
         }
         for index in collapsedSections.sorted() {
             lines.append("collapsed\t\(index)\t1")

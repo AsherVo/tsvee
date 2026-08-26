@@ -102,9 +102,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// Read-modify-write access to the document's TSSFormat (marks it dirty).
     var onFormatChange: (((inout TSSFormat) -> Void) -> Void)?
     var onSelectionChange: (() -> Void)?
-    /// This document's file URL — the base that select columns resolve their
-    /// relative option-sheet paths against.
+    /// This document's file URL — the base that select and source columns
+    /// resolve their relative sheet paths against.
     var documentURLProvider: (() -> URL?)?
+    /// A `source` column pulled in new values from the sheet it mirrors, so
+    /// this document's data now differs from what's on disk.
+    var onDerivedDataChanged: (() -> Void)?
 
     // MARK: - State
 
@@ -121,12 +124,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private var growColumns: [Int] = []
     private var booleanColumnIndices: Set<Int> = []
     private var cachedSelectSources: [Int: SelectSource] = [:]
+    private var cachedSourceSpecs: [Int: SourceSpec] = [:]
     /// Resolved option lists (and sets, for validation) per select column —
     /// refreshed with the model/format, and when the window becomes key again
     /// (the sheet the options come from may have been edited meanwhile).
     private var selectOptions: [Int: [String]] = [:]
     private var selectOptionSets: [Int: Set<String>] = [:]
-    private let optionsResolver = SelectOptionsResolver()
+    /// One reader for every sheet this one links to, shared by the two types
+    /// that link: a select column's option sheet is very often the same file
+    /// a source column mirrors.
+    private let sheetLoader = LinkedSheetLoader()
+    private lazy var optionsResolver = SelectOptionsResolver(loader: sheetLoader)
+    private lazy var sourceResolver = SourceColumnResolver(loader: sheetLoader)
+    /// Re-entrancy guard: filling a source column changes the model, which
+    /// comes straight back round to `modelDidChange`.
+    private var isPopulatingSourceColumns = false
     /// Wrapped-text height memo, keyed by "width|text" (value-based, so it
     /// survives model changes).
     private var wrapHeightCache: [String: CGFloat] = [:]
@@ -326,6 +338,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         growColumns = Set(textColumnIndices).union(model.columnsWithLineBreaks).sorted()
         booleanColumnIndices = Set(format.columnTypes.filter { $0.value == .boolean }.keys)
         cachedSelectSources = format.selectSources
+        cachedSourceSpecs = format.sourceSpecs
         refreshSelectOptions(format: format)
         frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
         frozenColCount = format.freezeIDColumn ? 1 : 0
@@ -342,6 +355,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         clampSelection()
         rebuildOffsets()
         needsDisplay = true
+        populateSourceColumns()
+    }
+
+    /// Re-reads every sheet this one links to and takes the consequences:
+    /// fresh options for the select columns, fresh values for the source ones.
+    /// Called when the window comes forward, since a linked sheet may have
+    /// been edited — in TSVee or anywhere else — while this one sat behind it.
+    func refreshLinkedSheets() {
+        guard !cachedSelectSources.isEmpty || !cachedSourceSpecs.isEmpty else { return }
+        modelDidChange()
     }
 
     /// Folds every collapsed header's section body out of sight. Entries that
@@ -855,6 +878,19 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
                               withAttributes: attrs)
                     cg.restoreGState()
+                case .source:
+                    // Mirrored from another sheet, not typed here: drawn a
+                    // shade back from the rest so it reads as filled in.
+                    let attrs: [NSAttributedString.Key: Any] = [
+                        .font: font,
+                        .foregroundColor: NSColor.secondaryLabelColor,
+                    ]
+                    let size = text.size(withAttributes: attrs)
+                    cg.saveGState()
+                    textClip.clip()
+                    text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
+                              withAttributes: attrs)
+                    cg.restoreGState()
                 case .integer, .float:
                     let valid = type == .integer ? Int(text) != nil : Double(text) != nil
                     let attrs: [NSAttributedString.Key: Any] = [
@@ -1000,6 +1036,44 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         selectOptions = lists
         selectOptionSets = lists.mapValues(Set.init)
     }
+
+    // MARK: - Mirrored values (`source` columns)
+
+    /// Fills every `source` column from the sheet it mirrors, matching this
+    /// sheet's rows to that one's by ID. Rows the source doesn't have are
+    /// blanked — the column says what the source says, including that it says
+    /// nothing — but a source that can't be read at all is left alone rather
+    /// than allowed to wipe the values already in the file.
+    private func populateSourceColumns() {
+        guard !isPopulatingSourceColumns, let model, !cachedSourceSpecs.isEmpty else { return }
+        isPopulatingSourceColumns = true
+        defer { isPopulatingSourceColumns = false }
+
+        let tsvURL = documentURLProvider?()
+        var changed = false
+        for (column, spec) in cachedSourceSpecs
+        where cachedTypes[column] == .source && column < model.columnCount {
+            guard let lookup = sourceResolver.values(for: spec, tsvURL: tsvURL) else { continue }
+            var mirrored: [Int: String] = [:]
+            for row in 0..<model.rowCount {
+                guard model.headerLevel(ofRow: row) == 0, !model.isFieldNameRow(row) else { continue }
+                let id = model.value(row: row, column: 0)
+                guard !id.isEmpty else { continue }
+                mirrored[row] = lookup[id] ?? ""
+            }
+            if model.applyDerivedValues(mirrored, column: column) { changed = true }
+        }
+        if changed { onDerivedDataChanged?() }
+    }
+
+    /// True where a `source` column owns the cell and so nothing can be typed
+    /// into it. Header and field-name rows are exempt — those are this sheet's
+    /// own structure, not values the source provides.
+    private func isMirroredCell(_ pos: GridPos) -> Bool {
+        cellType(row: pos.row, column: pos.col) == .source
+    }
+
+    // MARK: - Dropdowns, continued
 
     /// The cells the type governs — same rows a boolean column gives a
     /// checkbox: a plain data row with an ID, inside the data. nil elsewhere
@@ -1783,12 +1857,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     private func applyFill(target: (rows: ClosedRange<Int>, cols: ClosedRange<Int>, direction: FillDirection)) {
         guard let model else { return }
+        // A mirrored column has nothing to extend: its values come from
+        // another sheet, and the fill would be undone by the next refresh.
+        func fills(_ r: Int, _ c: Int) -> Bool { !isMirroredCell(GridPos(row: r, col: c)) }
         switch target.direction {
         case .down:
             for c in selectedCols {
                 let source = selectedRows.map { model.value(row: $0, column: c) }
                 let values = AutofillSeries.extend(source, count: target.rows.count)
                 for (i, r) in target.rows.enumerated() {
+                    guard fills(r, c) else { continue }
                     model.setValue(values[i], row: r, column: c)
                 }
             }
@@ -1797,6 +1875,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 let source = selectedRows.reversed().map { model.value(row: $0, column: c) }
                 let values = AutofillSeries.extend(source, count: target.rows.count)
                 for (i, r) in target.rows.reversed().enumerated() {
+                    guard fills(r, c) else { continue }
                     model.setValue(values[i], row: r, column: c)
                 }
             }
@@ -1805,6 +1884,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 let source = selectedCols.map { model.value(row: r, column: $0) }
                 let values = AutofillSeries.extend(source, count: target.cols.count)
                 for (i, c) in target.cols.enumerated() {
+                    guard fills(r, c) else { continue }
                     model.setValue(values[i], row: r, column: c)
                 }
             }
@@ -1813,6 +1893,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 let source = selectedCols.reversed().map { model.value(row: r, column: $0) }
                 let values = AutofillSeries.extend(source, count: target.cols.count)
                 for (i, c) in target.cols.reversed().enumerated() {
+                    guard fills(r, c) else { continue }
                     model.setValue(values[i], row: r, column: c)
                 }
             }
@@ -1832,7 +1913,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func remapColumnFormatting(_ mapping: [Int: Int]) {
         guard !mapping.isEmpty, let format = formatProvider?(),
               !(format.columnWidths.isEmpty && format.columnTypes.isEmpty
-                && format.selectSources.isEmpty && format.hiddenColumns.isEmpty) else { return }
+                && format.selectSources.isEmpty && format.sourceSpecs.isEmpty
+                && format.hiddenColumns.isEmpty) else { return }
         onFormatChange? { format in
             var widths: [Int: CGFloat] = [:]
             for (k, v) in format.columnWidths { widths[mapping[k] ?? k] = v }
@@ -1843,6 +1925,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             var sources: [Int: SelectSource] = [:]
             for (k, v) in format.selectSources { sources[mapping[k] ?? k] = v }
             format.selectSources = sources
+            var specs: [Int: SourceSpec] = [:]
+            for (k, v) in format.sourceSpecs { specs[mapping[k] ?? k] = v }
+            format.sourceSpecs = specs
             format.hiddenColumns = Set(format.hiddenColumns.map { mapping[$0] ?? $0 })
         }
         let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
@@ -1870,6 +1955,31 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Keyboard
 
+    /// Tab cycling, for the shortcuts the Window menu can't advertise on its
+    /// own. A menu item carries one key equivalent apiece, so ⌃⇥ / ⌃⇧⇥ are
+    /// named there and the older ⇧⌘[ / ⇧⌘] are matched here — as is ⌃⇧⇥
+    /// itself, since shift-tab arrives as back-tab (U+0019) rather than as a
+    /// shifted tab, which menu matching can miss. Matching here rather than in
+    /// `keyDown` means the shortcuts work with the find bar or a cell editor
+    /// focused too; the menu gets first refusal either way, so nothing fires
+    /// twice.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard let window, (window.tabbedWindows?.count ?? 0) > 1,
+              let key = event.charactersIgnoringModifiers else {
+            return super.performKeyEquivalent(with: event)
+        }
+        switch (event.modifierFlags.intersection(.deviceIndependentFlagsMask), key) {
+        case ([.command, .shift], "["), ([.control, .shift], "\t"),
+             ([.control, .shift], "\u{19}"):
+            window.selectPreviousTab(nil)
+        case ([.command, .shift], "]"), (.control, "\t"):
+            window.selectNextTab(nil)
+        default:
+            return super.performKeyEquivalent(with: event)
+        }
+        return true
+    }
+
     override func keyDown(with event: NSEvent) {
         guard let chars = event.charactersIgnoringModifiers, let scalar = chars.utf16.first else {
             super.keyDown(with: event)
@@ -1891,8 +2001,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case NSDownArrowFunctionKey: move(dRow: 1, dCol: 0, extend: shift)
         case NSLeftArrowFunctionKey: move(dRow: 0, dCol: -1, extend: shift)
         case NSRightArrowFunctionKey: move(dRow: 0, dCol: 1, extend: shift)
-        case 9: move(dRow: 0, dCol: 1, extend: false)                       // Tab
-        case 25: move(dRow: 0, dCol: -1, extend: false)                     // Shift-Tab
+        // ⇥ steps across the row; ⌃⇥ belongs to the window (cycling tabs) and
+        // is normally claimed by the menu long before it gets here.
+        case 9 where !mods.contains(.control):
+            move(dRow: 0, dCol: 1, extend: false)                            // Tab
+        case 25 where !mods.contains(.control):
+            move(dRow: 0, dCol: -1, extend: false)                           // Shift-Tab
         case 13, 3:                                                          // Return / Enter
             beginEditing(at: focus, initialText: nil)
         case 127, NSDeleteFunctionKey:                                       // Backspace / Del
@@ -1987,7 +2101,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     func beginEditing(at pos: GridPos, initialText: String?) {
-        guard let model, !hiddenRows.contains(pos.row) else { return }
+        guard let model, !hiddenRows.contains(pos.row), !isMirroredCell(pos) else { return }
         commitEdit(thenMove: nil)
         anchor = pos
         focus = pos
@@ -2130,6 +2244,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     /// Commit coming from the formula bar.
     func applyToFocusedCell(_ text: String) {
+        guard !isMirroredCell(focus) else { return }
         // The bar shows the file's own spelling of the value, `\n` and all.
         model?.setValue(sanitize(SpreadsheetModel.decodeCell(text), at: focus),
                         row: focus.row, column: focus.col)
@@ -2291,6 +2406,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         for (dr, line) in lines.enumerated() {
             for (dc, value) in line.enumerated() {
                 let pos = GridPos(row: origin.row + dr, col: origin.col + dc)
+                guard !isMirroredCell(pos) else { continue }
                 model.setValue(sanitize(SpreadsheetModel.decodeCell(value), at: pos),
                                row: pos.row, column: pos.col)
             }
@@ -2319,7 +2435,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func clearSelectedCells() {
         guard let model else { return }
         for r in selectedRows where r < model.rowCount {
-            for c in selectedCols where c < model.columnCount {
+            for c in selectedCols where c < model.columnCount
+                && !isMirroredCell(GridPos(row: r, col: c)) {
                 model.setValue("", row: r, column: c)
             }
         }
@@ -2520,7 +2637,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     private func shiftColumnFormatting(_ transform: (Int) -> Int?) {
         guard let format = formatProvider?(),
               !format.columnWidths.isEmpty || !format.columnTypes.isEmpty
-                || !format.selectSources.isEmpty || !format.hiddenColumns.isEmpty else { return }
+                || !format.selectSources.isEmpty || !format.sourceSpecs.isEmpty
+                || !format.hiddenColumns.isEmpty else { return }
         var widths: [Int: CGFloat] = [:]
         for (column, width) in format.columnWidths {
             if let moved = transform(column) { widths[moved] = width }
@@ -2533,29 +2651,38 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         for (column, source) in format.selectSources {
             if let moved = transform(column) { sources[moved] = source }
         }
-        setColumnFormatting(widths: widths, types: types, sources: sources,
+        var specs: [Int: SourceSpec] = [:]
+        for (column, spec) in format.sourceSpecs {
+            if let moved = transform(column) { specs[moved] = spec }
+        }
+        setColumnFormatting(widths: widths, types: types, sources: sources, specs: specs,
                             hidden: Set(format.hiddenColumns.compactMap(transform)))
     }
 
     /// The per-column counterpart of `setRowFormatting`.
     private func setColumnFormatting(widths: [Int: CGFloat], types: [Int: ColumnType],
-                                     sources: [Int: SelectSource], hidden: Set<Int>) {
+                                     sources: [Int: SelectSource], specs: [Int: SourceSpec],
+                                     hidden: Set<Int>) {
         guard let format = formatProvider?() else { return }
         let previousWidths = format.columnWidths
         let previousTypes = format.columnTypes
         let previousSources = format.selectSources
+        let previousSpecs = format.sourceSpecs
         let previousHidden = format.hiddenColumns
         guard widths != previousWidths || types != previousTypes
-            || sources != previousSources || hidden != previousHidden else { return }
+            || sources != previousSources || specs != previousSpecs
+            || hidden != previousHidden else { return }
         onFormatChange? {
             $0.columnWidths = widths
             $0.columnTypes = types
             $0.selectSources = sources
+            $0.sourceSpecs = specs
             $0.hiddenColumns = hidden
         }
         undoManager?.registerUndo(withTarget: self) { view in
             view.setColumnFormatting(widths: previousWidths, types: previousTypes,
-                                     sources: previousSources, hidden: previousHidden)
+                                     sources: previousSources, specs: previousSpecs,
+                                     hidden: previousHidden)
         }
         modelDidChange()
     }
@@ -2630,9 +2757,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 } else {
                     format.columnTypes[c] = type
                 }
-                // None of these types has an options source; picking one
-                // retires whatever a select column had configured.
+                // None of these types links to another sheet; picking one
+                // retires whatever a select or source column had configured.
                 format.selectSources.removeValue(forKey: c)
+                format.sourceSpecs.removeValue(forKey: c)
             }
         }
         modelDidChange()
@@ -2648,16 +2776,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let columns = selectedCols.filter { $0 < model.columnCount }
         guard let anchorColumn = columns.first else { return }
 
-        // Name the column by its field name when there is one, else by letter.
-        var columnName = "Column " + Self.columnLetters(anchorColumn)
-        if model.hasFieldNameRow {
-            let fieldName = model.value(row: 0, column: anchorColumn)
-            if !fieldName.isEmpty { columnName = "“\(fieldName)”" }
-        }
-        if columns.count > 1 { columnName += " (and \(columns.count - 1) more)" }
-
         guard let source = SelectSourcePanel.run(
-            columnName: columnName,
+            columnName: describe(columns: columns, anchoredAt: anchorColumn),
             typeTitle: type == .multiselect ? "Multi-Select" : "Select",
             existing: cachedSelectSources[anchorColumn],
             suggested: valuesInUse(columns: columns),
@@ -2667,9 +2787,46 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             for c in columns {
                 format.columnTypes[c] = type
                 format.selectSources[c] = source
+                format.sourceSpecs.removeValue(forKey: c)
             }
         }
         modelDidChange()
+    }
+
+    /// "Source…": which sheet to mirror, and which of its fields. Like the
+    /// select types this one carries a configuration, so re-picking it
+    /// re-opens the dialog prefilled instead of doing nothing.
+    @objc private func configureSourceColumns(_ sender: NSMenuItem) {
+        guard let model else { return }
+        let columns = selectedCols.filter { $0 < model.columnCount }
+        guard let anchorColumn = columns.first else { return }
+
+        guard let spec = SourceColumnPanel.run(
+            columnName: describe(columns: columns, anchoredAt: anchorColumn),
+            existing: cachedSourceSpecs[anchorColumn],
+            tsvURL: documentURLProvider?(),
+            resolver: sourceResolver) else { return }
+
+        onFormatChange? { format in
+            for c in columns {
+                format.columnTypes[c] = .source
+                format.sourceSpecs[c] = spec
+                format.selectSources.removeValue(forKey: c)
+            }
+        }
+        modelDidChange()
+    }
+
+    /// How the column-type dialogs name what they're about to configure: by
+    /// field name where there is one, else by letter, plus a count of the rest
+    /// of the selection.
+    private func describe(columns: [Int], anchoredAt anchorColumn: Int) -> String {
+        var name = "Column " + Self.columnLetters(anchorColumn)
+        if let model, model.hasFieldNameRow {
+            let fieldName = model.value(row: 0, column: anchorColumn)
+            if !fieldName.isEmpty { name = "“\(fieldName)”" }
+        }
+        return columns.count > 1 ? name + " (and \(columns.count - 1) more)" : name
     }
 
     /// The distinct values the given columns already hold, in sheet order —
@@ -2743,6 +2900,36 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     // MARK: - Cross-file ID navigation
 
+    /// Every open sheet, ordered the way the tab bar reads: this window's own
+    /// tab group left to right, then any sheet living in another window (in
+    /// whatever order the app has them). `NSDocumentController` hands them
+    /// over in the sequence they were opened in, which is nobody's mental
+    /// model of where a sheet is once the tabs have been dragged around.
+    private func openSheetsInTabOrder() -> [TSVDocument] {
+        let documents = NSDocumentController.shared.documents.compactMap { $0 as? TSVDocument }
+        guard let tabs = window?.tabbedWindows, tabs.count > 1 else { return documents }
+
+        var rank: [ObjectIdentifier: Int] = [:]
+        for (index, tab) in tabs.enumerated() { rank[ObjectIdentifier(tab)] = index }
+        return Self.orderedByTabPosition(documents) { document in
+            // A document showing in more than one window sits where its
+            // leftmost tab does.
+            document.windowControllers
+                .compactMap { $0.window.map(ObjectIdentifier.init).flatMap { rank[$0] } }
+                .min()
+        }
+    }
+
+    /// Orders items by tab position, leaving those with none — a sheet in some
+    /// other window — in the order they arrived in, after the rest. Split out
+    /// from the window lookup so the rule can be tested without windows.
+    static func orderedByTabPosition<T>(_ items: [T], position: (T) -> Int?) -> [T] {
+        items.enumerated()
+            .map { (offset: $0.offset, item: $0.element, rank: position($0.element)) }
+            .sorted { ($0.rank ?? Int.max, $0.offset) < ($1.rank ?? Int.max, $1.offset) }
+            .map(\.item)
+    }
+
     @objc private func jumpToDocument(_ sender: NSMenuItem) {
         guard let target = sender.representedObject as? CrossFileTarget,
               let document = target.document else { return }
@@ -2752,6 +2939,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     /// The focused cell — where a find starts searching from.
     var focusedCell: GridPos { focus }
+
+    /// False over a cell the sheet fills in for you, which the formula bar
+    /// shows read-only rather than inviting an edit that would be discarded.
+    var focusedCellIsEditable: Bool { !isMirroredCell(focus) }
 
     /// Selects a single cell and scrolls it into view (find & replace lands
     /// matches here).
@@ -2909,8 +3100,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let id = model.value(row: row, column: 0)
             if !id.isEmpty, !id.hasPrefix("#"), !model.isFieldNameRow(row) {
                 let submenu = NSMenu()
-                for case let document as TSVDocument in NSDocumentController.shared.documents
-                where document.model !== model {
+                for document in openSheetsInTabOrder() where document.model !== model {
                     guard let targetRow = document.model.firstRow(withID: id) else { continue }
                     let item = NSMenuItem(
                         title: "\(document.displayName ?? "Untitled") — row \(targetRow + 1)",
@@ -3008,6 +3198,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 else if selectedTypes.contains(type) { item.state = .mixed }
                 typeMenu.addItem(item)
             }
+            // Likewise Source, which names a sheet and one of its fields.
+            let sourceItem = NSMenuItem(title: "Source…",
+                                        action: #selector(configureSourceColumns(_:)),
+                                        keyEquivalent: "")
+            sourceItem.target = self
+            if selectedTypes == [.source] { sourceItem.state = .on }
+            else if selectedTypes.contains(.source) { sourceItem.state = .mixed }
+            typeMenu.addItem(sourceItem)
+
             let plural = selectedCols.count > 1
             let typeItem = NSMenuItem(title: plural ? "Column Data Types" : "Column Data Type",
                                       action: nil, keyEquivalent: "")

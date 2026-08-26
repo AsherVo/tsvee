@@ -326,6 +326,18 @@ final class SidecarSubstanceTests: XCTestCase {
         }
         XCTAssertNotEqual(listed.substantiveContent, relisted.substantiveContent)
         XCTAssertEqual(listed.substantiveContent, listed.substantiveContent)
+
+        // Re-pointing a source column changes what the sheet's data means as
+        // surely as re-listing a select column's options does.
+        let mirroring = format {
+            $0.columnTypes[2] = .source
+            $0.sourceSpecs[2] = SourceSpec(path: "enemies.tsv", field: "HP")
+        }
+        let remirrored = format {
+            $0.columnTypes[2] = .source
+            $0.sourceSpecs[2] = SourceSpec(path: "enemies.tsv", field: "Attack")
+        }
+        XCTAssertNotEqual(mirroring.substantiveContent, remirrored.substantiveContent)
     }
 
     func testUnknownRecordsCountAsSubstantive() {
@@ -339,6 +351,61 @@ final class SidecarSubstanceTests: XCTestCase {
         let narrow = format { $0.columnWidths[0] = 80 }
         XCTAssertEqual(TSSFormat.parse(wide.serialize()).substantiveContent,
                        TSSFormat.parse(narrow.serialize()).substantiveContent)
+    }
+}
+
+final class FollowStateTests: XCTestCase {
+
+    private func scratchState() -> FollowState {
+        let name = "tsvee-follow-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        return FollowState(defaults: defaults)
+    }
+
+    func testFollowingIsOnUntilTurnedOff() {
+        let state = scratchState()
+        XCTAssertTrue(state.isEnabled)
+        state.isEnabled = false
+        XCTAssertFalse(state.isEnabled)
+        state.isEnabled = true
+        XCTAssertTrue(state.isEnabled)
+    }
+
+    /// The toggle is a preference, not session state: a later launch reading
+    /// the same defaults has to see the choice, including "off" — which is
+    /// indistinguishable from "unset" unless it's really been written.
+    func testTheToggleOutlivesTheObject() {
+        let name = "tsvee-follow-tests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+
+        FollowState(defaults: defaults).isEnabled = false
+        XCTAssertFalse(FollowState(defaults: defaults).isEnabled)
+    }
+}
+
+final class TabOrderTests: XCTestCase {
+
+    private func order(_ positions: [Int?]) -> [Int] {
+        // Items are their own index, so the result reads as the new ordering.
+        SpreadsheetView.orderedByTabPosition(Array(positions.indices)) { positions[$0] }
+    }
+
+    func testSortsByTabPosition() {
+        XCTAssertEqual(order([2, 0, 1]), [1, 2, 0])
+    }
+
+    /// Sheets in another window have no tab position here; they go last,
+    /// keeping the order they came in (Swift's sort isn't stable on its own).
+    func testUnplacedItemsKeepTheirOrderAtTheEnd() {
+        XCTAssertEqual(order([nil, 1, nil, 0]), [3, 1, 0, 2])
+        XCTAssertEqual(order([nil, nil, nil]), [0, 1, 2])
+    }
+
+    func testEmptyAndSingleAreLeftAlone() {
+        XCTAssertEqual(order([]), [])
+        XCTAssertEqual(order([5]), [0])
     }
 }
 
