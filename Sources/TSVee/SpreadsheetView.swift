@@ -2432,6 +2432,43 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         selectionDidChange()
     }
 
+    // MARK: - Arithmetic on the selection
+
+    /// Selected cells arithmetic can touch: ones holding a number, and not
+    /// mirrored from another sheet (those get overwritten on the next refresh).
+    private var adjustableNumericCells: [GridPos] {
+        guard let model else { return [] }
+        var cells: [GridPos] = []
+        for r in selectedRows where r < model.rowCount {
+            for c in selectedCols where c < model.columnCount {
+                let pos = GridPos(row: r, col: c)
+                guard !isMirroredCell(pos),
+                      CellArithmetic.number(model.value(row: r, column: c)) != nil else { continue }
+                cells.append(pos)
+            }
+        }
+        return cells
+    }
+
+    @objc private func adjustSelectedValues(_ sender: NSMenuItem) {
+        guard let model,
+              let raw = sender.representedObject as? String,
+              let operation = CellArithmetic.Operation(rawValue: raw) else { return }
+        // Re-read the selection rather than trusting the count in the title:
+        // the sheet could have changed while the menu was open.
+        let cells = adjustableNumericCells
+        guard !cells.isEmpty else { NSSound.beep(); return }
+        guard let operand = CellArithmetic.runPrompt(operation: operation,
+                                                     cellCount: cells.count) else { return }
+        for pos in cells {
+            guard let updated = CellArithmetic.apply(
+                operation, operand: operand,
+                to: model.value(row: pos.row, column: pos.col)) else { continue }
+            model.setValue(updated, row: pos.row, column: pos.col)
+        }
+        undoManager?.setActionName(operation.actionName)
+    }
+
     private func clearSelectedCells() {
         guard let model else { return }
         for r in selectedRows where r < model.rowCount {
@@ -3140,6 +3177,27 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         menu.addItem(withTitle: "Cut", action: #selector(cut(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Paste", action: #selector(paste(_:)), keyEquivalent: "")
+
+        // Arithmetic over the selection — offered only where there's a number
+        // in it to change, since it would do nothing at all otherwise.
+        let numericCells = adjustableNumericCells
+        if !numericCells.isEmpty {
+            menu.addItem(.separator())
+            let adjustMenu = NSMenu()
+            for operation in CellArithmetic.Operation.allCases {
+                let item = NSMenuItem(title: operation.menuTitle,
+                                      action: #selector(adjustSelectedValues(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = operation.rawValue
+                adjustMenu.addItem(item)
+            }
+            let adjustItem = NSMenuItem(
+                title: numericCells.count == 1 ? "Adjust Value" : "Adjust \(numericCells.count) Values",
+                action: nil, keyEquivalent: "")
+            adjustItem.submenu = adjustMenu
+            menu.addItem(adjustItem)
+        }
+
         // Selecting whole columns is a statement about columns: row commands
         // there would act on the entire sheet, so they don't belong in the
         // menu at all (and vice versa).

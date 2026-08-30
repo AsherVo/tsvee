@@ -43,6 +43,56 @@ final class AutofillSeriesTests: XCTestCase {
     }
 }
 
+final class CellArithmeticTests: XCTestCase {
+
+    private func apply(_ op: CellArithmetic.Operation, _ operand: String, _ value: String) -> String? {
+        CellArithmetic.apply(op, operand: Decimal(string: operand, locale: Locale(identifier: "en_US_POSIX"))!,
+                             to: value)
+    }
+
+    func testOnlyCleanNumbersCount() {
+        XCTAssertEqual(CellArithmetic.number("12"), 12)
+        XCTAssertEqual(CellArithmetic.number("-0.5"), Decimal(string: "-0.5"))
+        XCTAssertEqual(CellArithmetic.number(".5"), Decimal(string: "0.5"))
+        for text in ["", " ", "12 hp", "1,000", "$3", "1e5", "--1", "1.2.3", "TRUE", "#Boss"] {
+            XCTAssertNil(CellArithmetic.number(text), "\(text) should not read as a number")
+        }
+    }
+
+    func testFourOperations() {
+        XCTAssertEqual(apply(.add, "5", "10"), "15")
+        XCTAssertEqual(apply(.subtract, "5", "10"), "5")
+        XCTAssertEqual(apply(.multiply, "3", "10"), "30")
+        XCTAssertEqual(apply(.divide, "4", "10"), "2.5")
+        XCTAssertEqual(apply(.add, "-2", "10"), "8")
+    }
+
+    func testNonNumericCellsAreLeftAlone() {
+        XCTAssertNil(apply(.multiply, "2", "Red Slime"))
+        XCTAssertNil(apply(.multiply, "2", ""))
+        XCTAssertNil(apply(.divide, "0", "10"))
+    }
+
+    func testDecimalMathsIsExact() {
+        // 0.1 + 0.2 in binary floating point would land on 0.30000000000000004.
+        XCTAssertEqual(apply(.add, "0.2", "0.1"), "0.3")
+        XCTAssertEqual(apply(.multiply, "1.1", "19.99"), "21.989")
+    }
+
+    func testResultKeepsTheCellsShape() {
+        XCTAssertEqual(apply(.add, "1", "007"), "008")
+        XCTAssertEqual(apply(.add, "1", "099"), "100")
+        XCTAssertEqual(apply(.multiply, "2", "1.50"), "3.00")
+        XCTAssertEqual(apply(.multiply, "2", "1.5"), "3.0")
+        // Padding can't survive a negative result, so the sign wins.
+        XCTAssertEqual(apply(.subtract, "10", "007"), "-3")
+    }
+
+    func testRepeatingDivisionIsRounded() {
+        XCTAssertEqual(apply(.divide, "3", "10"), "3.3333333333")
+    }
+}
+
 final class MoveTests: XCTestCase {
 
     private func makeModel(_ tsv: String) -> SpreadsheetModel {
