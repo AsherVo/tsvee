@@ -58,12 +58,15 @@ enum MainMenu {
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         menu.addItem(withTitle: "Save", action: #selector(NSDocument.save(_:)), keyEquivalent: "s")
+        // ⇧⌘S is Save As… here rather than Cocoa's ⌥⇧⌘S — saving a copy is a
+        // far more common move than saving every open sheet at once, which
+        // takes over the ⌥ slot.
         let saveAs = menu.addItem(withTitle: "Save As…",
                                   action: #selector(NSDocument.saveAs(_:)), keyEquivalent: "s")
-        saveAs.keyEquivalentModifierMask = [.command, .option, .shift]
+        saveAs.keyEquivalentModifierMask = [.command, .shift]
         let saveAll = menu.addItem(withTitle: "Save All",
                                    action: NSSelectorFromString("saveAllDocuments:"), keyEquivalent: "s")
-        saveAll.keyEquivalentModifierMask = [.command, .shift]
+        saveAll.keyEquivalentModifierMask = [.command, .option, .shift]
         menu.addItem(withTitle: "Revert to Saved",
                      action: #selector(NSDocument.revertToSaved(_:)), keyEquivalent: "")
         return menu

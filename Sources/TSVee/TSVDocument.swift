@@ -48,6 +48,12 @@ final class TSVDocument: NSDocument {
                        ofType typeName: String,
                        for saveOperation: NSDocument.SaveOperationType,
                        completionHandler: @escaping (Error?) -> Void) {
+        // Real saves settle a `boolean` column's blanks before writing; an
+        // autosaved copy is a snapshot of the work in progress, not a decision
+        // about what the data says.
+        if saveOperation == .saveOperation || saveOperation == .saveAsOperation {
+            materializeBooleanDefaults()
+        }
         super.save(to: url, ofType: typeName, for: saveOperation) { [weak self] error in
             // Sidecars only accompany real saves, never autosave copies.
             if error == nil,
@@ -61,6 +67,16 @@ final class TSVDocument: NSDocument {
             }
             completionHandler(error)
         }
+    }
+
+    /// An empty cell in a `boolean` column already reads as unchecked; on save
+    /// the file gets to say so, with a literal FALSE in every data row that has
+    /// an ID. Done before the write (rather than inside `data(ofType:)`) so the
+    /// grid, the undo stack, and the file all end up telling the same story.
+    private func materializeBooleanDefaults() {
+        let columns = Set(format.columnTypes.filter { $0.value == .boolean }.keys)
+        guard !columns.isEmpty else { return }
+        model.fillEmptyBooleanCells(inColumns: columns)
     }
 
     /// Called by the UI when formatting (column widths etc.) changes, so the

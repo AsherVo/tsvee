@@ -339,6 +339,63 @@ final class SpreadsheetModelTests: XCTestCase {
     }
 }
 
+final class BooleanColumnFillTests: XCTestCase {
+
+    /// Field-name row, a data row with a blank flag, a header, a row whose
+    /// flag is already set, one holding something the type doesn't describe,
+    /// and a stray line with no ID.
+    private func makeModel() -> SpreadsheetModel {
+        let model = SpreadsheetModel()
+        model.load(tsv: """
+        ID\tName\tTamed\tFled
+        slime\tSlime\t\t
+        # Section\t\t\t
+        bat\tBat\tTRUE\t
+        imp\tImp\tyes\t
+        \tstray\t\t
+        """)
+        return model
+    }
+
+    func testFillsEmptyCellsOfDataRowsOnly() {
+        let model = makeModel()
+        XCTAssertTrue(model.fillEmptyBooleanCells(inColumns: [2]))
+        XCTAssertEqual(model.value(row: 1, column: 2), "FALSE")   // was empty
+        XCTAssertEqual(model.value(row: 2, column: 2), "")        // header row
+        XCTAssertEqual(model.value(row: 3, column: 2), "TRUE")    // already set
+        XCTAssertEqual(model.value(row: 4, column: 2), "yes")     // not ours to rewrite
+        XCTAssertEqual(model.value(row: 5, column: 2), "")        // no ID
+        XCTAssertEqual(model.value(row: 0, column: 2), "Tamed")   // field-name row
+        // Only the boolean column is touched.
+        XCTAssertEqual(model.value(row: 1, column: 3), "")
+    }
+
+    func testFillsEveryBooleanColumnAndReportsNoWorkLeft() {
+        let model = makeModel()
+        XCTAssertTrue(model.fillEmptyBooleanCells(inColumns: [2, 3]))
+        XCTAssertEqual(model.value(row: 3, column: 3), "FALSE")
+        // Saving again has nothing to settle, so the sheet stays clean.
+        XCTAssertFalse(model.fillEmptyBooleanCells(inColumns: [2, 3]))
+    }
+
+    func testIsOneUndoStep() {
+        let model = makeModel()
+        let undoManager = UndoManager()
+        model.undoManager = undoManager
+        model.fillEmptyBooleanCells(inColumns: [2, 3])
+        undoManager.undo()
+        XCTAssertEqual(model.value(row: 1, column: 2), "")
+        XCTAssertEqual(model.value(row: 3, column: 3), "")
+        XCTAssertEqual(model.value(row: 3, column: 2), "TRUE")
+    }
+
+    func testIgnoresColumnsPastTheData() {
+        let model = makeModel()
+        XCTAssertFalse(model.fillEmptyBooleanCells(inColumns: [9]))
+        XCTAssertEqual(model.columnCount, 4)
+    }
+}
+
 final class DerivedValueTests: XCTestCase {
 
     private func makeModel() -> SpreadsheetModel {

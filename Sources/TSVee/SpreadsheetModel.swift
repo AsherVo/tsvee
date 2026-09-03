@@ -282,6 +282,33 @@ final class SpreadsheetModel {
         return true
     }
 
+    /// Writes `FALSE` into the empty cells of `boolean` columns, so the file
+    /// says what the sheet already shows — an empty cell there draws as an
+    /// unchecked box, and saving is when that reading becomes the data.
+    ///
+    /// Only rows that can own a value are filled: plain data rows with an ID,
+    /// never headers, the field-name row, or the ID-less lines between
+    /// sections. Cells holding anything other than TRUE/FALSE are left alone —
+    /// that's data the column type doesn't describe, and TSVee flags it rather
+    /// than rewriting it. One undo step; returns whether anything changed.
+    @discardableResult
+    func fillEmptyBooleanCells(inColumns columns: Set<Int>) -> Bool {
+        var changes: [(row: Int, column: Int, value: String)] = []
+        for row in rows.indices {
+            guard headerLevel(ofRow: row) == 0, !isFieldNameRow(row),
+                  !rows[row][0].isEmpty else { continue }
+            for column in columns.sorted()
+            where column >= 0 && column < columnCount && rows[row][column].isEmpty {
+                changes.append((row, column, BooleanCell.literal(false)))
+            }
+        }
+        guard !changes.isEmpty else { return false }
+        setCells(changes)
+        undoManager?.setActionName(columns.count == 1 ? "Fill Boolean Column"
+                                                      : "Fill Boolean Columns")
+        return true
+    }
+
     /// Grows the grid to contain the given size (used when editing the
     /// phantom cells past the end of the data). Undoable.
     func ensureSize(rows neededRows: Int, columns neededColumns: Int) {

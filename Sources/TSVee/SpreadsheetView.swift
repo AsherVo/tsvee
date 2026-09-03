@@ -2256,9 +2256,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         guard control === editor else { return false }
         switch commandSelector {
+        // Enter commits in place: the cell you were editing stays the cell
+        // you're on, so a fix and a second Enter reopens the same cell.
         case #selector(NSResponder.insertNewline(_:)):
-            let shift = NSApp.currentEvent?.modifierFlags.contains(.shift) ?? false
-            commitEdit(thenMove: shift ? .up : .down)
+            commitEdit(thenMove: nil)
             return true
         case #selector(NSResponder.insertTab(_:)):
             commitEdit(thenMove: .right)
