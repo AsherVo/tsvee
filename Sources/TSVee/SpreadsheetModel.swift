@@ -578,6 +578,30 @@ final class SpreadsheetModel {
 
     // MARK: - Unique-ID enforcement
 
+    /// Rows whose value in the given column collides with another row's — what
+    /// a column with the "Flag Duplicates" option turns red. The ID column's
+    /// rule, one column over: only entries are compared (`#` header and
+    /// comment rows, the field-name row and ID-less rows are exempt), and an
+    /// empty cell is never a collision. For column 0 this is `duplicateIDRows`.
+    func duplicateRows(inColumn column: Int) -> Set<Int> {
+        guard column >= 0, column < columnCount else { return [] }
+        var firstSeen: [String: Int] = [:]
+        var duplicates: Set<Int> = []
+        for (index, row) in rows.enumerated() {
+            guard headerLevel(ofRow: index) == 0, !isFieldNameRow(index),
+                  !row[0].isEmpty else { continue }
+            let value = row[column]
+            if value.isEmpty { continue }
+            if let earlier = firstSeen[value] {
+                duplicates.insert(earlier)
+                duplicates.insert(index)
+            } else {
+                firstSeen[value] = index
+            }
+        }
+        return duplicates
+    }
+
     private func recomputeDuplicates() {
         var firstSeen: [String: Int] = [:]
         var duplicates: Set<Int> = []

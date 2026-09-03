@@ -169,6 +169,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// the marker drawn at the seam.
     private var hiddenColumns: Set<Int> = []
 
+    /// Columns with the "Flag Duplicates" option on (mirrors the `.tss` set),
+    /// and for each of them the rows whose value repeats another row's. Derived
+    /// on every model change, so the red tint follows what's typed.
+    private var duplicateFlagColumns: Set<Int> = []
+    private var duplicateFlagRows: [Int: Set<Int>] = [:]
+
     private var anchor = GridPos(row: 0, col: 0)
     private var focus = GridPos(row: 0, col: 0)
 
@@ -351,6 +357,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // Column 0 and the phantom columns are never hideable, whatever a
         // hand-edited sidecar says.
         hiddenColumns = format.hiddenColumns.filter { $0 >= 1 && $0 < model.columnCount }
+        // Column 0 flags its duplicate IDs by itself, whatever the sidecar says.
+        duplicateFlagColumns = format.flagDuplicateColumns
+            .filter { $0 >= 1 && $0 < model.columnCount }
+        duplicateFlagRows = duplicateFlagColumns.reduce(into: [:]) { rows, column in
+            rows[column] = model.duplicateRows(inColumn: column)
+        }
         recomputeHiddenRows(model: model)
         clampSelection()
         rebuildOffsets()
@@ -758,6 +770,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if model.duplicateIDRows.contains(r) {
                 Palette.duplicateFill.setFill()
                 cellRect(r, 0).fill()
+            }
+            // The same tint in a column that asked for it — a repeated value
+            // where the sheet says values shouldn't repeat.
+            for c in cols where duplicateFlagColumns.contains(c) && !hiddenColumns.contains(c) {
+                guard duplicateFlagRows[c]?.contains(r) == true else { continue }
+                Palette.duplicateFill.setFill()
+                cellRect(r, c).fill()
             }
         }
 
@@ -1914,7 +1933,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard !mapping.isEmpty, let format = formatProvider?(),
               !(format.columnWidths.isEmpty && format.columnTypes.isEmpty
                 && format.selectSources.isEmpty && format.sourceSpecs.isEmpty
-                && format.hiddenColumns.isEmpty) else { return }
+                && format.hiddenColumns.isEmpty
+                && format.flagDuplicateColumns.isEmpty) else { return }
         onFormatChange? { format in
             var widths: [Int: CGFloat] = [:]
             for (k, v) in format.columnWidths { widths[mapping[k] ?? k] = v }
@@ -1929,6 +1949,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             for (k, v) in format.sourceSpecs { specs[mapping[k] ?? k] = v }
             format.sourceSpecs = specs
             format.hiddenColumns = Set(format.hiddenColumns.map { mapping[$0] ?? $0 })
+            format.flagDuplicateColumns =
+                Set(format.flagDuplicateColumns.map { mapping[$0] ?? $0 })
         }
         let inverse = Dictionary(uniqueKeysWithValues: mapping.map { ($1, $0) })
         undoManager?.registerUndo(withTarget: self) { view in
@@ -2676,7 +2698,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         guard let format = formatProvider?(),
               !format.columnWidths.isEmpty || !format.columnTypes.isEmpty
                 || !format.selectSources.isEmpty || !format.sourceSpecs.isEmpty
-                || !format.hiddenColumns.isEmpty else { return }
+                || !format.hiddenColumns.isEmpty
+                || !format.flagDuplicateColumns.isEmpty else { return }
         var widths: [Int: CGFloat] = [:]
         for (column, width) in format.columnWidths {
             if let moved = transform(column) { widths[moved] = width }
@@ -2694,33 +2717,36 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if let moved = transform(column) { specs[moved] = spec }
         }
         setColumnFormatting(widths: widths, types: types, sources: sources, specs: specs,
-                            hidden: Set(format.hiddenColumns.compactMap(transform)))
+                            hidden: Set(format.hiddenColumns.compactMap(transform)),
+                            flagged: Set(format.flagDuplicateColumns.compactMap(transform)))
     }
 
     /// The per-column counterpart of `setRowFormatting`.
     private func setColumnFormatting(widths: [Int: CGFloat], types: [Int: ColumnType],
                                      sources: [Int: SelectSource], specs: [Int: SourceSpec],
-                                     hidden: Set<Int>) {
+                                     hidden: Set<Int>, flagged: Set<Int>) {
         guard let format = formatProvider?() else { return }
         let previousWidths = format.columnWidths
         let previousTypes = format.columnTypes
         let previousSources = format.selectSources
         let previousSpecs = format.sourceSpecs
         let previousHidden = format.hiddenColumns
+        let previousFlagged = format.flagDuplicateColumns
         guard widths != previousWidths || types != previousTypes
             || sources != previousSources || specs != previousSpecs
-            || hidden != previousHidden else { return }
+            || hidden != previousHidden || flagged != previousFlagged else { return }
         onFormatChange? {
             $0.columnWidths = widths
             $0.columnTypes = types
             $0.selectSources = sources
             $0.sourceSpecs = specs
             $0.hiddenColumns = hidden
+            $0.flagDuplicateColumns = flagged
         }
         undoManager?.registerUndo(withTarget: self) { view in
             view.setColumnFormatting(widths: previousWidths, types: previousTypes,
                                      sources: previousSources, specs: previousSpecs,
-                                     hidden: previousHidden)
+                                     hidden: previousHidden, flagged: previousFlagged)
         }
         modelDidChange()
     }
@@ -2850,6 +2876,33 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 format.columnTypes[c] = .source
                 format.sourceSpecs[c] = spec
                 format.selectSources.removeValue(forKey: c)
+            }
+        }
+        modelDidChange()
+    }
+
+    // MARK: - Flag Duplicates
+
+    /// The selected columns the option can speak for: real data columns, never
+    /// the ID column (whose IDs are checked whatever anyone asks for) and never
+    /// the phantom space past the data.
+    private var flaggableSelectedColumns: [Int] {
+        guard let model else { return [] }
+        return selectedCols.filter { $0 >= 1 && $0 < model.columnCount }
+    }
+
+    /// "Flag Duplicates": tint a column's repeated values red the way
+    /// colliding IDs are tinted. Like a mixed-state checkbox, a selection
+    /// where only some columns have it on turns it on for all of them.
+    @objc private func toggleFlagDuplicates(_ sender: Any?) {
+        let columns = flaggableSelectedColumns
+        guard !columns.isEmpty else { return }
+        let turnOn = !columns.allSatisfy { duplicateFlagColumns.contains($0) }
+        onFormatChange? { format in
+            if turnOn {
+                format.flagDuplicateColumns.formUnion(columns)
+            } else {
+                format.flagDuplicateColumns.subtract(columns)
             }
         }
         modelDidChange()
@@ -3272,6 +3325,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             typeItem.submenu = typeMenu
             menu.addItem(typeItem)
 
+            if !flaggableSelectedColumns.isEmpty {
+                menu.addItem(withTitle: "Flag Duplicates",
+                             action: #selector(toggleFlagDuplicates(_:)), keyEquivalent: "")
+            }
+
+            typeMenu.addItem(.separator())
+
             let autoSize = NSMenuItem(title: plural ? "Auto-Size Columns" : "Auto-Size Column",
                                       action: #selector(autoSizeColumns(_:)), keyEquivalent: "")
             autoSize.target = self
@@ -3331,6 +3391,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             return !isFullRowSelection && count > 0
         case #selector(showAllHiddenColumns(_:)):
             return !hiddenColumns.isEmpty
+        case #selector(toggleFlagDuplicates(_:)):
+            let columns = flaggableSelectedColumns
+            let flagged = columns.filter { duplicateFlagColumns.contains($0) }
+            menuItem.state = flagged.isEmpty ? .off
+                : (flagged.count == columns.count ? .on : .mixed)
+            return !isFullRowSelection && !columns.isEmpty
         case #selector(deleteSelectedRows(_:)):
             guard let model, !isFullColumnSelection else { return false }
             return selectedRows.lowerBound < model.rowCount && model.rowCount > 1

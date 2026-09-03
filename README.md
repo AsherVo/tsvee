@@ -191,6 +191,24 @@ follow their column when you drag-reorder. Header (`#`) rows and the
 field-name row ignore column types. **Auto-Size Column** in the same menu
 fits the width to the longest cell (field name included).
 
+## Flag Duplicates
+
+Right-click a column (header or any cell) → **Flag Duplicates** — a checkbox
+option that holds the column to the ID column's standard: a cell whose value
+exactly matches another cell in the same column is tinted red, and so is the
+one it matches. Nothing is blocked and nothing is rewritten; it's the same
+red-tint cue duplicate IDs get.
+
+- Matching is exact — `Alpha`, `alpha` and `Alpha ` are three different values.
+- Only entries are compared, the rule the tally and fold counts use: `#`
+  header and comment rows, the field-name row (a column name that repeats a
+  value isn't a collision) and ID-less rows are all exempt, as is an empty
+  cell.
+- Any number of columns can be flagged, and it's independent of the column's
+  data type. The ID column has no checkbox — its IDs are always checked.
+- The state lives in the `.tss` sidecar, so it survives reopening and follows
+  its column when you drag-reorder.
+
 ## Cross-file ID navigation
 
 The same ID often lives in several files (stats in one, dialogue in
@@ -221,6 +239,11 @@ window/tab title, plus the close-button dot) and prompt on close/quit.
   an independent window with its own tab group; **⇧⌘N** opens a fresh
   standalone window. Window → Merge All Windows collects everything back
   into one.
+- The app opens with a blank sheet, and **opening a file when that untouched
+  blank sheet is all there is replaces it** — the file takes its tab and its
+  window, instead of leaving an empty sheet behind. Type in the blank sheet,
+  or have a second sheet open, and nothing is closed on you. **⌘N** always
+  gets you another blank sheet.
 
 ## `.tss` — Tab Separated Support (stubbed)
 
@@ -238,6 +261,7 @@ rowheight	<rowIndex>	<points>
 coltype	<columnIndex>	raw|integer|float|text|boolean|select|multiselect|source
 collapsed	<headerRowIndex>	1
 hiddencol	<columnIndex>	1
+flagdupes	<columnIndex>	1
 freeze	fieldrow|idcol	0|1
 selectlist	<columnIndex>	<option>	<option>	…
 selectfile	<columnIndex>	<relative path to .tsv>
@@ -251,10 +275,11 @@ options, by a path relative to this file. A `source` column carries
 `sourcecol`, naming the sheet it mirrors and the field of it to show.
 
 The UI writes column widths (drag-resize a column), column types, collapsed
-sections, hidden columns and the freeze toggles today; freeze records are only
+sections, hidden columns, flagged-duplicate columns and the freeze toggles
+today; freeze records are only
 written when a pane is un-frozen, since frozen is the default, and `raw` column
 types are never written. Per-row records (`rowheight`, `collapsed`) and
-per-column ones (`colwidth`, `coltype`, `hiddencol`) are re-keyed when
+per-column ones (`colwidth`, `coltype`, `hiddencol`, `flagdupes`) are re-keyed when
 rows/columns are inserted, deleted or reordered, so they stay attached to their content, and state on something
 deleted is dropped rather than relocated. Unknown record types are preserved verbatim on rewrite, so future
 fields — cell styles, merged headers, calculated columns — can be added in

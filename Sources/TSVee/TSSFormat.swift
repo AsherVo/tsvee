@@ -14,6 +14,7 @@ import Foundation
 ///     rowheight	<rowIndex>	<points>
 ///     collapsed	<headerRowIndex>	1
 ///     hiddencol	<columnIndex>	1
+///     flagdupes	<columnIndex>	1
 ///     selectlist	<columnIndex>	<option>	<option>	…
 ///     selectfile	<columnIndex>	<relative path to .tsv>
 ///     sourcecol	<columnIndex>	<relative path to .tsv>	<field name>
@@ -104,6 +105,11 @@ struct TSSFormat {
     /// Where `source` columns mirror their values from.
     var sourceSpecs: [Int: SourceSpec] = [:]
 
+    /// Columns whose repeated values are flagged red, the way colliding IDs
+    /// are. The ID column is never in here — its IDs are checked whatever the
+    /// sidecar says.
+    var flagDuplicateColumns: Set<Int> = []
+
     /// Header rows whose sections are collapsed. Entries for rows that are no
     /// longer headers are inert (and pruned on the next toggle), so an edited-
     /// away "#" can never strand its rows out of sight.
@@ -123,13 +129,14 @@ struct TSSFormat {
     var hasCustomFormatting: Bool {
         !columnWidths.isEmpty || !rowHeights.isEmpty || !columnTypes.isEmpty
             || !selectSources.isEmpty || !sourceSpecs.isEmpty || !collapsedSections.isEmpty
-            || !hiddenColumns.isEmpty
+            || !hiddenColumns.isEmpty || !flagDuplicateColumns.isEmpty
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
     }
 
-    /// The half of the sidecar that says what the data *is*: column types and
-    /// where their options come from. Records from a version of TSS we don't
-    /// know are counted here too — we can't rule out that they matter.
+    /// The half of the sidecar that says what the data *is*: column types,
+    /// where their options come from, and which columns must not repeat
+    /// themselves. Records from a version of TSS we don't know are counted
+    /// here too — we can't rule out that they matter.
     ///
     /// Everything else — widths, heights, collapsed sections, hidden columns,
     /// frozen panes — is decoration: how one person happens to be looking at
@@ -138,6 +145,7 @@ struct TSSFormat {
         var columnTypes: [Int: ColumnType]
         var selectSources: [Int: SelectSource]
         var sourceSpecs: [Int: SourceSpec]
+        var flagDuplicateColumns: Set<Int>
         var unknownRecords: [String]
     }
 
@@ -145,6 +153,7 @@ struct TSSFormat {
         SubstantiveContent(columnTypes: columnTypes,
                            selectSources: selectSources,
                            sourceSpecs: sourceSpecs,
+                           flagDuplicateColumns: flagDuplicateColumns,
                            unknownRecords: unknownRecords)
     }
 
@@ -196,6 +205,12 @@ struct TSSFormat {
                 if let index = Int(fields[1]), !fields[2].isEmpty, !fields[3].isEmpty {
                     format.sourceSpecs[index] = SourceSpec(path: fields[2], field: fields[3])
                 }
+            // The ID column is checked for duplicates unconditionally, so a
+            // record naming it says nothing.
+            case "flagdupes" where fields.count >= 3:
+                if let index = Int(fields[1]), index >= 1, fields[2] != "0" {
+                    format.flagDuplicateColumns.insert(index)
+                }
             case "collapsed" where fields.count >= 3:
                 if let index = Int(fields[1]), index >= 0, fields[2] != "0" {
                     format.collapsedSections.insert(index)
@@ -240,6 +255,9 @@ struct TSSFormat {
         }
         for (index, spec) in sourceSpecs.sorted(by: { $0.key < $1.key }) {
             lines.append("sourcecol\t\(index)\t\(spec.path)\t\(spec.field)")
+        }
+        for index in flagDuplicateColumns.sorted() where index >= 1 {
+            lines.append("flagdupes\t\(index)\t1")
         }
         for index in collapsedSections.sorted() {
             lines.append("collapsed\t\(index)\t1")

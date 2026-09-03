@@ -89,6 +89,33 @@ final class SpreadsheetModelTests: XCTestCase {
         XCTAssertTrue(model.duplicateIDRows.isEmpty)
     }
 
+    // MARK: - Flagged duplicate columns
+
+    func testDuplicateRowsInColumn() {
+        let model = makeModel("ID\tName\na\tAlpha\nb\tBeta\nc\tAlpha")
+        XCTAssertEqual(model.duplicateRows(inColumn: 1), [1, 3])
+        XCTAssertTrue(model.duplicateRows(inColumn: 0).isEmpty)
+    }
+
+    func testDuplicateRowsInColumnSkipNonEntriesAndEmptyCells() {
+        // Repeated column names, header-row cells, ID-less rows and empty
+        // cells are all things a flagged column has no quarrel with. The
+        // "Name" in row 4 collides with the field name, not with an entry.
+        let model = makeModel("ID\tName\na\t\n# Section\tName\nb\t\n\tdup\n\tdup\nc\tName")
+        XCTAssertTrue(model.duplicateRows(inColumn: 1).isEmpty)
+    }
+
+    func testDuplicateRowsInColumnMatchExactly() {
+        let model = makeModel("ID\tName\na\tAlpha\nb\talpha\nc\tAlpha ")
+        XCTAssertTrue(model.duplicateRows(inColumn: 1).isEmpty)
+    }
+
+    func testDuplicateRowsInColumnOutOfRange() {
+        let model = makeModel("ID\tName\na\tAlpha")
+        XCTAssertTrue(model.duplicateRows(inColumn: 5).isEmpty)
+        XCTAssertTrue(model.duplicateRows(inColumn: -1).isEmpty)
+    }
+
     // MARK: - Header rows
 
     func testHeaderLevels() {

@@ -318,6 +318,41 @@ final class FolderOpenTests: XCTestCase {
     }
 }
 
+final class BlankSheetReplacementTests: XCTestCase {
+
+    /// A stand-in for the documents on screen: (untitled?, edited?).
+    private struct Sheet {
+        var untitled: Bool
+        var edited: Bool
+    }
+
+    private func replaced(_ sheets: [Sheet], openingFile: Bool = true) -> Bool {
+        TSVDocumentController.replaceableBlankSheet(
+            among: sheets, openingFile: openingFile,
+            isUntitled: { $0.untitled }, isEdited: { $0.edited }) != nil
+    }
+
+    func testLoneUntouchedBlankSheetIsReplaced() {
+        XCTAssertTrue(replaced([Sheet(untitled: true, edited: false)]))
+    }
+
+    func testATouchedOrSavedSheetStays() {
+        XCTAssertFalse(replaced([Sheet(untitled: true, edited: true)]))
+        XCTAssertFalse(replaced([Sheet(untitled: false, edited: false)]))
+    }
+
+    func testNothingIsReplacedWhenOtherSheetsAreOpen() {
+        // Two sheets is a workspace; opening a third doesn't tidy it up.
+        XCTAssertFalse(replaced([Sheet(untitled: true, edited: false),
+                                 Sheet(untitled: false, edited: false)]))
+        XCTAssertFalse(replaced([]))
+    }
+
+    func testANewUntitledSheetReplacesNothing() {
+        XCTAssertFalse(replaced([Sheet(untitled: true, edited: false)], openingFile: false))
+    }
+}
+
 final class TabTitleTests: XCTestCase {
 
     func testDirtyMarkerLeadsAndExtensionDrops() {
@@ -482,5 +517,31 @@ final class HiddenColumnTests: XCTestCase {
         hidden.hiddenColumns = [2]
         XCTAssertEqual(TSSFormat().substantiveContent, hidden.substantiveContent)
         XCTAssertTrue(hidden.hasCustomFormatting)
+    }
+}
+
+final class FlagDuplicateColumnTests: XCTestCase {
+
+    func testFlaggedColumnsRoundTrip() {
+        var format = TSSFormat()
+        format.flagDuplicateColumns = [3, 1]
+        let out = format.serialize()
+        XCTAssertTrue(out.contains("flagdupes\t1\t1"))
+        XCTAssertTrue(out.contains("flagdupes\t3\t1"))
+        XCTAssertEqual(TSSFormat.parse(out).flagDuplicateColumns, [1, 3])
+    }
+
+    func testIDColumnIsNeverFlagged() {
+        // Its IDs are checked anyway, so a sidecar saying so says nothing.
+        XCTAssertTrue(TSSFormat.parse("flagdupes\t0\t1\n").flagDuplicateColumns.isEmpty)
+        XCTAssertTrue(TSSFormat.parse("flagdupes\t2\t0\n").flagDuplicateColumns.isEmpty)
+    }
+
+    func testFlaggingIsSubstantive() {
+        // A rule about what the data may contain, not how it's displayed.
+        var flagged = TSSFormat()
+        flagged.flagDuplicateColumns = [2]
+        XCTAssertNotEqual(TSSFormat().substantiveContent, flagged.substantiveContent)
+        XCTAssertTrue(flagged.hasCustomFormatting)
     }
 }
