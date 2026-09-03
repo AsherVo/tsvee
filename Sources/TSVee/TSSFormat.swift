@@ -18,6 +18,7 @@ import Foundation
 ///     selectlist	<columnIndex>	<option>	<option>	…
 ///     selectfile	<columnIndex>	<relative path to .tsv>
 ///     sourcecol	<columnIndex>	<relative path to .tsv>	<field name>
+///     accent	blue|purple|pink|red|orange|yellow|green|graphite
 ///
 /// TODO(tss): cell styles (font/color/alignment), merged headers, calculated
 /// columns. Add new record types here; unknown records are preserved verbatim.
@@ -123,6 +124,10 @@ struct TSSFormat {
     var freezeFieldRow = true
     var freezeIDColumn = true
 
+    /// This sheet's accent color. `.system` is the default and is never
+    /// persisted.
+    var accent: SheetAccent = .system
+
     /// Records from a newer/unknown TSS version, preserved on rewrite.
     private var unknownRecords: [String] = []
 
@@ -131,6 +136,7 @@ struct TSSFormat {
             || !selectSources.isEmpty || !sourceSpecs.isEmpty || !collapsedSections.isEmpty
             || !hiddenColumns.isEmpty || !flagDuplicateColumns.isEmpty
             || !unknownRecords.isEmpty || !freezeFieldRow || !freezeIDColumn
+            || accent != .system
     }
 
     /// The half of the sidecar that says what the data *is*: column types,
@@ -139,8 +145,9 @@ struct TSSFormat {
     /// here too — we can't rule out that they matter.
     ///
     /// Everything else — widths, heights, collapsed sections, hidden columns,
-    /// frozen panes — is decoration: how one person happens to be looking at
-    /// the sheet. A difference there is never worth interrupting anyone over.
+    /// frozen panes, the accent color — is decoration: how one person happens
+    /// to be looking at the sheet. A difference there is never worth
+    /// interrupting anyone over.
     struct SubstantiveContent: Equatable {
         var columnTypes: [Int: ColumnType]
         var selectSources: [Int: SelectSource]
@@ -219,6 +226,12 @@ struct TSSFormat {
                 if let index = Int(fields[1]), index >= 1, fields[2] != "0" {
                     format.hiddenColumns.insert(index)
                 }
+            // An accent name from a newer TSVee (or a typo) is simply not a
+            // color we can draw, so the sheet falls back to the system one.
+            case "accent" where fields.count >= 2:
+                if let accent = SheetAccent(rawValue: fields[1]) {
+                    format.accent = accent
+                }
             case "freeze" where fields.count >= 3:
                 switch fields[1] {
                 case "fieldrow": format.freezeFieldRow = fields[2] != "0"
@@ -265,6 +278,7 @@ struct TSSFormat {
         for index in hiddenColumns.sorted() where index >= 1 {
             lines.append("hiddencol\t\(index)\t1")
         }
+        if accent != .system { lines.append("accent\t\(accent.rawValue)") }
         if !freezeFieldRow { lines.append("freeze\tfieldrow\t0") }
         if !freezeIDColumn { lines.append("freeze\tidcol\t0") }
         lines.append(contentsOf: unknownRecords)

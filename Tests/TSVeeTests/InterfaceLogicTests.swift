@@ -291,6 +291,50 @@ final class TSSFreezeTests: XCTestCase {
     }
 }
 
+final class SheetAccentTests: XCTestCase {
+
+    func testSystemAccentIsTheDefaultAndIsNeverWritten() {
+        let format = TSSFormat()
+        XCTAssertEqual(format.accent, .system)
+        XCTAssertFalse(format.hasCustomFormatting)
+        XCTAssertFalse(format.serialize().contains("accent"))
+    }
+
+    func testNamedAccentRoundTrips() {
+        var format = TSSFormat()
+        format.accent = .purple
+        XCTAssertTrue(format.hasCustomFormatting)
+        let out = format.serialize()
+        XCTAssertTrue(out.contains("accent\tpurple"))
+        XCTAssertEqual(TSSFormat.parse(out).accent, .purple)
+    }
+
+    // A color TSVee can't draw is no reason to refuse the sheet: it falls
+    // back to the system accent, the same as a sheet that never named one.
+    func testUnknownAccentFallsBackToSystem() {
+        XCTAssertEqual(TSSFormat.parse("accent\tchartreuse\n").accent, .system)
+        XCTAssertEqual(TSSFormat.parse("accent\n").accent, .system)
+    }
+
+    // Accent is decoration, like column widths — two people picking different
+    // colors for the same sheet is never worth a "changed on disk" dialog.
+    func testAccentIsNotSubstantive() {
+        var blue = TSSFormat()
+        blue.accent = .blue
+        var green = TSSFormat()
+        green.accent = .green
+        XCTAssertEqual(blue.substantiveContent, green.substantiveContent)
+    }
+
+    func testEveryAccentHasADistinctTitleAndSwatch() {
+        let titles = SheetAccent.allCases.map(\.title)
+        XCTAssertEqual(Set(titles).count, SheetAccent.allCases.count)
+        XCTAssertEqual(SheetAccent.system.title, "Automatic")
+        XCTAssertEqual(SheetAccent.graphite.title, "Graphite")
+        XCTAssertTrue(SheetAccent.allCases.allSatisfy { $0.swatch.size.width > 0 })
+    }
+}
+
 final class FolderOpenTests: XCTestCase {
 
     func testTSVFilesListsOnlyTopLevelTSVsInFinderOrder() throws {

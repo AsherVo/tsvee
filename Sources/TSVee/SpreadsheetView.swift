@@ -62,36 +62,43 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         static let hiddenMarkerInset: CGFloat = resizeGrabMargin + 1
     }
 
-    private enum Palette {
-        static var gridLine: NSColor { NSColor.separatorColor.withAlphaComponent(0.4) }
-        static var paneEdge: NSColor { NSColor.separatorColor }
-        static var chromeBackground: NSColor { .windowBackgroundColor }
-        static var chromeText: NSColor { .secondaryLabelColor }
-        static var chromeSelected: NSColor { NSColor.controlAccentColor.withAlphaComponent(0.25) }
-        static var selectionFill: NSColor { NSColor.controlAccentColor.withAlphaComponent(0.10) }
-        static var selectionBorder: NSColor { .controlAccentColor }
-        static var duplicateFill: NSColor { NSColor.systemRed.withAlphaComponent(0.18) }
+    /// Every color the grid draws with, hanging off one accent — the system's
+    /// by default, or whichever one this sheet named in its sidecar.
+    private struct Palette {
+        let accent: NSColor
+
+        var gridLine: NSColor { NSColor.separatorColor.withAlphaComponent(0.4) }
+        var paneEdge: NSColor { NSColor.separatorColor }
+        var chromeBackground: NSColor { .windowBackgroundColor }
+        var chromeText: NSColor { .secondaryLabelColor }
+        var chromeSelected: NSColor { accent.withAlphaComponent(0.25) }
+        var selectionFill: NSColor { accent.withAlphaComponent(0.10) }
+        var selectionBorder: NSColor { accent }
+        var duplicateFill: NSColor { NSColor.systemRed.withAlphaComponent(0.18) }
         /// Field-name row: neutral grey, clearly distinct from the
         /// accent-tinted section headers.
-        static var fieldRowFill: NSColor { NSColor.systemGray.withAlphaComponent(0.22) }
-        static func headerFill(level: Int) -> NSColor {
+        var fieldRowFill: NSColor { NSColor.systemGray.withAlphaComponent(0.22) }
+        func headerFill(level: Int) -> NSColor {
             switch level {
-            case 1: return NSColor.controlAccentColor.withAlphaComponent(0.32)
-            case 2: return NSColor.controlAccentColor.withAlphaComponent(0.20)
+            case 1: return accent.withAlphaComponent(0.32)
+            case 2: return accent.withAlphaComponent(0.20)
             default: return NSColor.systemGray.withAlphaComponent(0.08)   // ### = comment
             }
         }
 
-        static var frozenEdge: NSColor { NSColor.separatorColor.withAlphaComponent(1.0) }
+        var frozenEdge: NSColor { NSColor.separatorColor.withAlphaComponent(1.0) }
 
         /// The "N rows" pill on a collapsed section header.
-        static var badgeFill: NSColor { NSColor.labelColor.withAlphaComponent(0.10) }
+        var badgeFill: NSColor { NSColor.labelColor.withAlphaComponent(0.10) }
 
         /// `boolean` checkboxes, borrowing the system's own control colors.
-        static var checkboxOn: NSColor { .controlAccentColor }
-        static var checkboxMark: NSColor { .white }
-        static var checkboxOff: NSColor { NSColor.tertiaryLabelColor }
+        var checkboxOn: NSColor { accent }
+        var checkboxMark: NSColor { .white }
+        var checkboxOff: NSColor { NSColor.tertiaryLabelColor }
     }
+
+    /// Refreshed from the sidecar whenever the format changes.
+    private var palette = Palette(accent: SheetAccent.system.color)
 
     // MARK: - Wiring
 
@@ -346,6 +353,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         cachedSelectSources = format.selectSources
         cachedSourceSpecs = format.sourceSpecs
         refreshSelectOptions(format: format)
+        palette = Palette(accent: format.accent.color)
         frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
         frozenColCount = format.freezeIDColumn ? 1 : 0
         gridRows = model.rowCount + Metrics.phantomRows
@@ -676,7 +684,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             // selection reaching it can give down here.
             if selectedRows.contains(sticky.row) {
                 let span = rectFor(rows: sticky.row...sticky.row, cols: selectedCols)
-                Palette.selectionFill.setFill()
+                palette.selectionFill.setFill()
                 NSRect(x: span.minX, y: band.minY, width: span.width, height: band.height)
                     .intersection(band).fill()
             }
@@ -685,7 +693,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // A firm edge under the stack: it floats over the sheet, and the row it
         // half covers should read as covered rather than cut off.
         if let stackBottom {
-            Palette.paneEdge.setFill()
+            palette.paneEdge.setFill()
             NSRect(x: vis.minX + Metrics.rowHeaderWidth, y: stackBottom - 1,
                    width: vis.width - Metrics.rowHeaderWidth, height: 1).fill()
         }
@@ -760,34 +768,34 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             var fill: NSColor?
             if r < model.rowCount {
                 let level = model.headerLevel(ofRow: r)
-                if level > 0 { fill = Palette.headerFill(level: level) }
-                else if model.isFieldNameRow(r) { fill = Palette.fieldRowFill }
+                if level > 0 { fill = palette.headerFill(level: level) }
+                else if model.isFieldNameRow(r) { fill = palette.fieldRowFill }
             }
             if let fill {
                 fill.setFill()
                 NSRect(x: xOffsets[0], y: yOffsets[r], width: fullWidth, height: height(ofRow: r)).fill()
             }
             if model.duplicateIDRows.contains(r) {
-                Palette.duplicateFill.setFill()
+                palette.duplicateFill.setFill()
                 cellRect(r, 0).fill()
             }
             // The same tint in a column that asked for it — a repeated value
             // where the sheet says values shouldn't repeat.
             for c in cols where duplicateFlagColumns.contains(c) && !hiddenColumns.contains(c) {
                 guard duplicateFlagRows[c]?.contains(r) == true else { continue }
-                Palette.duplicateFill.setFill()
+                palette.duplicateFill.setFill()
                 cellRect(r, c).fill()
             }
         }
 
         // Selection fill.
         if selection {
-            Palette.selectionFill.setFill()
+            palette.selectionFill.setFill()
             rectFor(rows: selectedRows, cols: selectedCols).fill()
         }
 
         // Grid lines.
-        Palette.gridLine.setFill()
+        palette.gridLine.setFill()
         let top = yOffsets[rows.lowerBound], bottom = yOffsets[rows.upperBound + 1]
         let left = xOffsets[cols.lowerBound], right = xOffsets[cols.upperBound + 1]
         for c in cols.lowerBound...(cols.upperBound + 1) {
@@ -799,7 +807,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
         // Collapsed headers get a firm bottom edge — the seam where the folded
         // rows went (the skipped row numbers are the other half of the cue).
-        Palette.paneEdge.setFill()
+        palette.paneEdge.setFill()
         for r in rows where collapsedRows.contains(r) && !hiddenRows.contains(r) {
             guard model.sectionBody(ofRow: r) != nil else { continue }
             NSRect(x: xOffsets[0], y: yOffsets[r + 1] - 2, width: fullWidth, height: 2).fill()
@@ -942,7 +950,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let path = NSBezierPath(rect: rectFor(rows: target.rows, cols: target.cols).insetBy(dx: 0.5, dy: 0.5))
             path.setLineDash([4, 3], count: 2, phase: 0)
             path.lineWidth = 1.5
-            Palette.selectionBorder.withAlphaComponent(0.8).setStroke()
+            palette.selectionBorder.withAlphaComponent(0.8).setStroke()
             path.stroke()
         }
 
@@ -951,13 +959,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let rect = rectFor(rows: selectedRows, cols: selectedCols).insetBy(dx: 0.5, dy: 0.5)
             let path = NSBezierPath(rect: rect)
             path.lineWidth = 2
-            Palette.selectionBorder.setStroke()
+            palette.selectionBorder.setStroke()
             path.stroke()
 
             let handle = NSRect(x: rect.maxX - 4, y: rect.maxY - 4, width: 8, height: 8)
             NSColor.textBackgroundColor.setFill()
             NSBezierPath(ovalIn: handle).fill()
-            Palette.selectionBorder.setFill()
+            palette.selectionBorder.setFill()
             NSBezierPath(ovalIn: handle.insetBy(dx: 1, dy: 1)).fill()
         }
 
@@ -1001,7 +1009,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let box = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
         box.lineWidth = 1
         if checked {
-            Palette.checkboxOn.setFill()
+            palette.checkboxOn.setFill()
             box.fill()
             // Flipped view: maxY is the bottom, so the middle point of the
             // check is the low one.
@@ -1012,12 +1020,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             check.lineWidth = 1.8
             check.lineCapStyle = .round
             check.lineJoinStyle = .round
-            Palette.checkboxMark.setStroke()
+            palette.checkboxMark.setStroke()
             check.stroke()
         } else {
             NSColor.textBackgroundColor.setFill()
             box.fill()
-            Palette.checkboxOff.setStroke()
+            palette.checkboxOff.setStroke()
             box.stroke()
         }
     }
@@ -1258,15 +1266,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let rect = NSRect(x: xOffsets[c] + translateX, y: vis.minY,
                               width: xOffsets[c + 1] - xOffsets[c], height: headerH)
             if selectedCols.contains(c) {
-                Palette.chromeSelected.setFill()
+                palette.chromeSelected.setFill()
                 rect.fill()
             }
             let title = Self.columnLetters(c)
-            let attrs: [NSAttributedString.Key: Any] = [.font: chromeFont, .foregroundColor: Palette.chromeText]
+            let attrs: [NSAttributedString.Key: Any] = [.font: chromeFont, .foregroundColor: palette.chromeText]
             let size = title.size(withAttributes: attrs)
             title.draw(at: NSPoint(x: rect.midX - size.width / 2, y: rect.midY - size.height / 2),
                        withAttributes: attrs)
-            Palette.gridLine.setFill()
+            palette.gridLine.setFill()
             NSRect(x: rect.maxX - 0.5, y: vis.minY, width: 1, height: headerH).fill()
         }
 
@@ -1275,13 +1283,13 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let rect = NSRect(x: vis.minX, y: yOffsets[r] + translateY,
                               width: headerW, height: height(ofRow: r))
             if selectedRows.contains(r) {
-                Palette.chromeSelected.setFill()
+                palette.chromeSelected.setFill()
                 rect.fill()
             }
             let isDuplicate = model.duplicateIDRows.contains(r)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: numberFont,
-                .foregroundColor: isDuplicate ? NSColor.systemRed : Palette.chromeText,
+                .foregroundColor: isDuplicate ? NSColor.systemRed : palette.chromeText,
             ]
             let title = String(r + 1)
             let size = title.size(withAttributes: attrs)
@@ -1290,12 +1298,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             if model.sectionBody(ofRow: r) != nil {
                 drawSectionToggle(in: rect, collapsed: collapsedRows.contains(r))
             }
-            Palette.gridLine.setFill()
+            palette.gridLine.setFill()
             NSRect(x: vis.minX, y: rect.maxY - 0.5, width: headerW, height: 1).fill()
         }
 
         // Column letter band.
-        Palette.chromeBackground.setFill()
+        palette.chromeBackground.setFill()
         NSRect(x: vis.minX, y: vis.minY, width: vis.width, height: headerH).fill()
         if let bodyCols {
             cg.saveGState()
@@ -1320,7 +1328,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
 
         // Row number strip.
-        Palette.chromeBackground.setFill()
+        palette.chromeBackground.setFill()
         NSRect(x: vis.minX, y: vis.minY + headerH, width: headerW, height: vis.height - headerH).fill()
         if let bodyRows {
             cg.saveGState()
@@ -1336,7 +1344,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                               width: headerW, height: sticky.visibleHeight)
             cg.saveGState()
             cg.clip(to: band)
-            Palette.chromeBackground.setFill()
+            palette.chromeBackground.setFill()
             band.fill()
             drawNumber(sticky.row, translateY: sticky.y - yOffsets[sticky.row])
             cg.restoreGState()
@@ -1344,14 +1352,14 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         for r in 0..<frozenRowCount { drawNumber(r, translateY: vis.minY) }
 
         // Corner box.
-        Palette.chromeBackground.setFill()
+        palette.chromeBackground.setFill()
         NSRect(x: vis.minX, y: vis.minY, width: headerW, height: headerH).fill()
 
         // Chrome and frozen-pane edges (pane edges slightly stronger).
-        Palette.gridLine.setFill()
+        palette.gridLine.setFill()
         NSRect(x: vis.minX, y: vis.minY + headerH - 0.5, width: vis.width, height: 1).fill()
         NSRect(x: vis.minX + headerW - 0.5, y: vis.minY, width: 1, height: vis.height).fill()
-        Palette.gridLine.setFill()
+        palette.gridLine.setFill()
         if frozenRowCount > 0 {
             NSRect(x: vis.minX, y: vis.minY + chromeTop - Metrics.frozenEdgeThickness * 2/3, width: vis.width, height: Metrics.frozenEdgeThickness).fill()
         }
@@ -1378,7 +1386,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             path.line(to: NSPoint(x: x + s / 2, y: y + s - 1))
         }
         path.close()
-        (collapsed ? NSColor.controlAccentColor : Palette.chromeText).setFill()
+        (collapsed ? palette.accent : palette.chromeText).setFill()
         path.fill()
     }
 
@@ -1386,7 +1394,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// where the columns would be. Clicking it brings them back — the missing
     /// letters (C, then E) are the other half of the cue.
     private func drawHiddenColumnsMarker(in box: NSRect) {
-        Palette.badgeFill.setFill()
+        palette.badgeFill.setFill()
         NSBezierPath(roundedRect: box, xRadius: 2.5, yRadius: 2.5).fill()
         let size: CGFloat = 3.5
         let gap: CGFloat = 1.5
@@ -1399,7 +1407,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         path.line(to: NSPoint(x: box.midX + gap, y: box.midY - size))
         path.line(to: NSPoint(x: box.midX + gap, y: box.midY + size))
         path.close()
-        NSColor.controlAccentColor.setFill()
+        palette.accent.setFill()
         path.fill()
     }
 
@@ -1428,7 +1436,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let pill = NSRect(x: (cell.maxX - size.width - 16).rounded(),
                           y: (cell.midY - size.height / 2 - 2).rounded(),
                           width: (size.width + 12).rounded(), height: (size.height + 4).rounded())
-        Palette.badgeFill.setFill()
+        palette.badgeFill.setFill()
         NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill()
         label.draw(at: NSPoint(x: pill.minX + 6, y: pill.midY - size.height / 2),
                    withAttributes: Self.badgeAttributes)
@@ -1452,7 +1460,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     private func drawMoveIndicator(vis: NSRect) {
         guard let drop = moveDropIndex else { return }
-        Palette.selectionBorder.setFill()
+        palette.selectionBorder.setFill()
         switch dragMode {
         case .moveRows:
             let sticky = drop <= frozenRowCount ? vis.minY : 0
@@ -2520,6 +2528,22 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         modelDidChange()
     }
 
+    // MARK: - Accent color (Sheet menu)
+
+    /// Repaints this sheet in the accent color named by the menu item. Only
+    /// colors change, so there's no geometry to rebuild.
+    @objc func setSheetAccent(_ sender: Any?) {
+        guard let accent = Self.accent(of: sender as? NSMenuItem) else { return }
+        onFormatChange? { $0.accent = accent }
+        palette = Palette(accent: accent.color)
+        needsDisplay = true
+    }
+
+    private static func accent(of menuItem: NSMenuItem?) -> SheetAccent? {
+        guard let raw = menuItem?.representedObject as? String else { return nil }
+        return SheetAccent(rawValue: raw)
+    }
+
     // MARK: - Section folding
 
     /// The section the cursor sits in — the focused row itself when it's a
@@ -3330,7 +3354,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                              action: #selector(toggleFlagDuplicates(_:)), keyEquivalent: "")
             }
 
-            typeMenu.addItem(.separator())
+            menu.addItem(.separator())
 
             let autoSize = NSMenuItem(title: plural ? "Auto-Size Columns" : "Auto-Size Column",
                                       action: #selector(autoSizeColumns(_:)), keyEquivalent: "")
@@ -3357,6 +3381,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case #selector(toggleFreezeIDColumn(_:)):
             let format = formatProvider?() ?? TSSFormat()
             menuItem.state = format.freezeIDColumn ? .on : .off
+            return true
+        case #selector(setSheetAccent(_:)):
+            let format = formatProvider?() ?? TSSFormat()
+            menuItem.state = Self.accent(of: menuItem) == format.accent ? .on : .off
             return true
         // Insert titles count what they'll actually do, in both menus. Row
         // commands stay out of the way of a whole-column selection (where they

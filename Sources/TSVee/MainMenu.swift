@@ -160,6 +160,25 @@ enum MainMenu {
         // App-wide rather than per-sheet, so it's handled by the app delegate.
         menu.addItem(withTitle: "Follow Current ID",
                      action: NSSelectorFromString("toggleFollowCurrentID:"), keyEquivalent: "")
+
+        menu.addItem(.separator())
+        menu.addItem(submenu(accentMenu(), title: "Accent Color"))
+        return menu
+    }
+
+    /// The accent color this sheet draws in, remembered in its `.tss`.
+    /// "Automatic" — the system accent — is the default, and is set apart
+    /// from the named colors below it.
+    private static func accentMenu() -> NSMenu {
+        let menu = NSMenu(title: "Accent Color")
+        for accent in SheetAccent.allCases {
+            let item = menu.addItem(withTitle: accent.title,
+                                    action: NSSelectorFromString("setSheetAccent:"),
+                                    keyEquivalent: "")
+            item.representedObject = accent.rawValue
+            item.image = accent.swatch
+            if accent == .system { menu.addItem(.separator()) }
+        }
         return menu
     }
 

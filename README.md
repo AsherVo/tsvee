@@ -96,6 +96,19 @@ bundle` app carries).
   can't be deleted or displaced.
 - Full undo/redo.
 
+## Accent color
+
+The grid's tint — range selection, `#`/`##` header rows, checkboxes, fold
+triangles — is your **system accent color** by default, so TSVee matches the
+rest of the Mac. **Sheet → Accent Color** overrides it per sheet with any of
+the eight macOS accent colors; **Automatic** hands it back to the system.
+
+- The choice lives in the `.tss` sidecar, so it survives reopening and travels
+  with the sheet. Sheets in the same project can each have their own, which
+  is the point: color is the fastest way to tell two open tabs apart.
+- Duplicate-ID flagging stays red whatever the accent is, so a red-accented
+  sheet is the one case where the two read alike.
+
 ## Hiding columns
 
 Right-click a column (header or any cell) → **Hide Columns** (also in the
@@ -266,6 +279,7 @@ freeze	fieldrow|idcol	0|1
 selectlist	<columnIndex>	<option>	<option>	…
 selectfile	<columnIndex>	<relative path to .tsv>
 sourcecol	<columnIndex>	<relative path to .tsv>	<field name>
+accent	blue|purple|pink|red|orange|yellow|green|graphite
 ```
 
 `select`/`multiselect` columns carry one extra record naming their options
@@ -275,10 +289,11 @@ options, by a path relative to this file. A `source` column carries
 `sourcecol`, naming the sheet it mirrors and the field of it to show.
 
 The UI writes column widths (drag-resize a column), column types, collapsed
-sections, hidden columns, flagged-duplicate columns and the freeze toggles
-today; freeze records are only
+sections, hidden columns, flagged-duplicate columns, the accent color and the
+freeze toggles today; freeze records are only
 written when a pane is un-frozen, since frozen is the default, and `raw` column
-types are never written. Per-row records (`rowheight`, `collapsed`) and
+types and the `system` accent are never written — an accent name TSVee doesn't
+know falls back to the system one. Per-row records (`rowheight`, `collapsed`) and
 per-column ones (`colwidth`, `coltype`, `hiddencol`, `flagdupes`) are re-keyed when
 rows/columns are inserted, deleted or reordered, so they stay attached to their content, and state on something
 deleted is dropped rather than relocated. Unknown record types are preserved verbatim on rewrite, so future
@@ -293,6 +308,7 @@ add a record type to `parse`/`serialize` and consume it in
 Sources/TSVee/
   SpreadsheetModel.swift        the TSV grid: parsing, mutations, undo, unique-ID checks, section ranges
   TSSFormat.swift               the .tss sidecar (stub v0)
+  SheetAccent.swift             the per-sheet accent color (system by default)
   TSVDocument.swift             NSDocument glue: read/write TSV + sidecar
   SpreadsheetView.swift         custom-drawn grid (only visible cells render — big files stay fast)
   FormulaBarView.swift          name box + raw value editor + duplicate-ID badge
