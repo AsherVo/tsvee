@@ -37,6 +37,7 @@ enum SheetPath {
 final class LinkedSheetLoader {
 
     private var diskCache: [String: (modified: Date, model: SpreadsheetModel)] = [:]
+    private var formatCache: [String: (modified: Date, format: TSSFormat)] = [:]
 
     func model(at url: URL) -> SpreadsheetModel? {
         if let document = Self.openDocument(at: url) { return document.model }
@@ -53,6 +54,27 @@ final class LinkedSheetLoader {
         model.load(tsv: text)
         diskCache[url.path] = (modified, model)
         return model
+    }
+
+    /// A linked sheet's formatting sidecar — how its columns are typed, which
+    /// is what a `source` column reads to take on the type of the field it
+    /// mirrors. Same rules as `model(at:)`: an open sheet answers with its live
+    /// formatting, anything else is read from disk and cached until the
+    /// sidecar changes. nil when that sheet has no sidecar at all.
+    func format(at url: URL) -> TSSFormat? {
+        if let document = Self.openDocument(at: url) { return document.format }
+
+        let sidecar = TSSFormat.sidecarURL(for: url)
+        let modified = Self.modificationDate(of: sidecar)
+        if let cached = formatCache[sidecar.path], cached.modified == modified {
+            return cached.format
+        }
+        guard let format = TSSFormat.load(for: url) else {
+            formatCache[sidecar.path] = nil
+            return nil
+        }
+        formatCache[sidecar.path] = (modified, format)
+        return format
     }
 
     private static func modificationDate(of url: URL) -> Date {

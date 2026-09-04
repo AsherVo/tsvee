@@ -257,7 +257,7 @@ final class DocumentWindowController: NSWindowController {
     /// Compact title for a tab: the dirty marker goes up front (narrow tabs
     /// truncate the tail, so a trailing marker is the first thing to vanish)
     /// and the ".tsv" every tab shares is dropped — it's pure noise at tab
-    /// width. The full name lives in the tab's tooltip.
+    /// width. The file's full path lives in the tab's tooltip.
     static func tabTitle(for displayName: String, edited: Bool) -> String {
         let name = (displayName as NSString).pathExtension.lowercased() == "tsv"
             ? (displayName as NSString).deletingPathExtension
@@ -279,7 +279,9 @@ final class DocumentWindowController: NSWindowController {
         guard let window, let document = document as? NSDocument else { return }
         window.tab.title = Self.tabTitle(for: document.displayName,
                                          edited: document.isDocumentEdited)
-        window.tab.toolTip = document.displayName
+        // Two sheets of the same name in different folders are told apart by
+        // hovering, so the tooltip is the path, not the name again.
+        window.tab.toolTip = document.fileURL?.path ?? document.displayName
     }
 
     /// Brings this sheet forward and selects the given row (cross-file ID

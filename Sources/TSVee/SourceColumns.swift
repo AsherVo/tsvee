@@ -5,9 +5,11 @@ import AppKit
 final class SourceColumnResolver {
 
     private let loader: LinkedSheetLoader
+    private let optionsResolver: SelectOptionsResolver
 
     init(loader: LinkedSheetLoader = LinkedSheetLoader()) {
         self.loader = loader
+        self.optionsResolver = SelectOptionsResolver(loader: loader)
     }
 
     /// The spec'd field's value for every entry of the source sheet, keyed by
@@ -34,6 +36,45 @@ final class SourceColumnResolver {
         return values
     }
 
+    /// How the mirrored field is typed in the sheet it comes from, so a
+    /// `source` column can present its values the way that sheet does — a
+    /// mirrored boolean field draws checkboxes, a mirrored number right-aligns.
+    ///
+    /// nil when there's nothing to inherit: the sheet can't be resolved, has no
+    /// such field, or types it as plain `raw`.
+    func inheritedType(for spec: SourceSpec, tsvURL: URL?) -> InheritedType? {
+        var spec = spec
+        var base = tsvURL
+        // A donor that is itself a `source` column has no type of its own to
+        // give — it passes along whatever it mirrors, so the chain is followed
+        // to whatever typed it. `visited` stops a cycle from spinning.
+        var visited: Set<String> = []
+        while true {
+            guard let target = SheetPath.resolve(spec.path, relativeTo: base),
+                  visited.insert("\(target.path)\t\(spec.field)").inserted,
+                  let model = loader.model(at: target),
+                  let column = Self.column(named: spec.field, in: model),
+                  let format = loader.format(at: target) else { return nil }
+
+            let type = format.columnTypes[column] ?? .raw
+            if type == .source {
+                guard let next = format.sourceSpecs[column] else { return nil }
+                spec = next
+                base = target
+                continue
+            }
+            guard type != .raw else { return nil }
+
+            // Options belong to the sheet that defines them: a `selectfile`
+            // path over there is relative to that sheet, not to this one.
+            var options: [String] = []
+            if type == .select || type == .multiselect, let source = format.selectSources[column] {
+                options = optionsResolver.options(for: source, tsvURL: target)
+            }
+            return InheritedType(type: type, options: options)
+        }
+    }
+
     /// The field names another sheet offers, in column order. The ID column is
     /// left out: mirroring it into a column already matched by ID would just
     /// copy the IDs back. A sheet with no field-name row names nothing, so it
@@ -45,6 +86,13 @@ final class SourceColumnResolver {
             let name = model.value(row: 0, column: column)
             return name.isEmpty || !seen.insert(name).inserted ? nil : name
         }
+    }
+
+    /// What a `source` column takes on from the column it mirrors: that
+    /// column's data type, plus the options behind it when it is a select.
+    struct InheritedType: Equatable {
+        var type: ColumnType
+        var options: [String]
     }
 
     private static func column(named field: String, in model: SpreadsheetModel) -> Int? {

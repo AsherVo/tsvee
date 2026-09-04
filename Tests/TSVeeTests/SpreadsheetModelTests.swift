@@ -571,6 +571,88 @@ final class SourceColumnResolverTests: XCTestCase {
     }
 }
 
+/// A `source` column wears the type of the field it mirrors, so the values it
+/// shows read the way they do in the sheet they came from.
+final class SourceColumnInheritanceTests: XCTestCase {
+
+    private var dir = FileManager.default.temporaryDirectory
+
+    override func setUpWithError() throws {
+        dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("tsvee-inherit-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { [dir] in try? FileManager.default.removeItem(at: dir) }
+    }
+
+    /// Writes `<name>.tsv` and, when given, its `<name>.tss` sidecar.
+    private func write(_ name: String, tsv: String, tss: String? = nil) throws {
+        try tsv.write(to: dir.appendingPathComponent("\(name).tsv"),
+                      atomically: true, encoding: .utf8)
+        if let tss {
+            try tss.write(to: dir.appendingPathComponent("\(name).tss"),
+                          atomically: true, encoding: .utf8)
+        }
+    }
+
+    private var heroes: URL { dir.appendingPathComponent("heroes.tsv") }
+
+    private func inherited(field: String, from sheet: String = "enemies")
+        -> SourceColumnResolver.InheritedType? {
+        SourceColumnResolver().inheritedType(
+            for: SourceSpec(path: "\(sheet).tsv", field: field), tsvURL: heroes)
+    }
+
+    func testMirroredBooleanFieldIsInherited() throws {
+        try write("enemies", tsv: "ID\tName\tBoss\nslime\tSlime\tFALSE\n",
+                  tss: "tss\t0\ncoltype\t2\tboolean\n")
+        XCTAssertEqual(inherited(field: "Boss"),
+                       SourceColumnResolver.InheritedType(type: .boolean, options: []))
+    }
+
+    func testUntypedDonorHasNothingToInherit() throws {
+        try write("enemies", tsv: "ID\tName\tBoss\nslime\tSlime\tFALSE\n",
+                  tss: "tss\t0\ncoltype\t2\tboolean\n")
+        // A field typed nowhere, a field that doesn't exist, a sheet that
+        // doesn't exist, and a sheet with no sidecar at all.
+        XCTAssertNil(inherited(field: "Name"))
+        XCTAssertNil(inherited(field: "Attack"))
+        XCTAssertNil(inherited(field: "Boss", from: "missing"))
+        try write("plain", tsv: "ID\tBoss\nslime\tFALSE\n")
+        XCTAssertNil(inherited(field: "Boss", from: "plain"))
+    }
+
+    /// The options come with the type, resolved against the sheet that defines
+    /// them — a `selectfile` path over there is relative to *that* sheet.
+    func testMirroredSelectBringsItsOptions() throws {
+        try write("enemies", tsv: "ID\tElement\nslime\twater\n",
+                  tss: "tss\t0\ncoltype\t1\tselect\nselectlist\t1\tfire\twater\n")
+        XCTAssertEqual(inherited(field: "Element"),
+                       SourceColumnResolver.InheritedType(type: .select,
+                                                          options: ["fire", "water"]))
+
+        try write("elements", tsv: "ID\nfire\nwater\nearth\n")
+        try write("enemies", tsv: "ID\tElement\nslime\twater\n",
+                  tss: "tss\t0\ncoltype\t1\tselect\nselectfile\t1\telements.tsv\n")
+        XCTAssertEqual(inherited(field: "Element")?.options, ["fire", "water", "earth"])
+    }
+
+    /// A donor that mirrors a third sheet has no type of its own to give, so
+    /// the chain is followed to whatever typed the field originally.
+    func testChainOfMirrorsFollowsThroughToTheTypedColumn() throws {
+        try write("bosses", tsv: "ID\tBoss\nslime\tTRUE\n",
+                  tss: "tss\t0\ncoltype\t1\tboolean\n")
+        try write("enemies", tsv: "ID\tBoss\nslime\tTRUE\n",
+                  tss: "tss\t0\ncoltype\t1\tsource\nsourcecol\t1\tbosses.tsv\tBoss\n")
+        XCTAssertEqual(inherited(field: "Boss")?.type, .boolean)
+    }
+
+    func testMirrorsPointingAtEachOtherResolveToNothing() throws {
+        try write("enemies", tsv: "ID\tBoss\nslime\tTRUE\n",
+                  tss: "tss\t0\ncoltype\t1\tsource\nsourcecol\t1\tenemies.tsv\tBoss\n")
+        XCTAssertNil(inherited(field: "Boss"))
+    }
+}
+
 final class SelectCellTests: XCTestCase {
 
     private let options: Set<String> = ["fire", "water", "earth"]

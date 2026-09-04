@@ -137,6 +137,10 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// (the sheet the options come from may have been edited meanwhile).
     private var selectOptions: [Int: [String]] = [:]
     private var selectOptionSets: [Int: Set<String>] = [:]
+
+    /// What each `source` column takes on from the field it mirrors, for the
+    /// columns whose donor is typed. See `displayType(ofColumn:)`.
+    private var inheritedSourceTypes: [Int: SourceColumnResolver.InheritedType] = [:]
     /// One reader for every sheet this one links to, shared by the two types
     /// that link: a select column's option sheet is very often the same file
     /// a source column mirrors.
@@ -347,11 +351,15 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         cachedWidths = format.columnWidths
         cachedHeights = format.rowHeights
         cachedTypes = format.columnTypes
-        textColumnIndices = format.columnTypes.filter { $0.value == .text }.keys.sorted()
-        growColumns = Set(textColumnIndices).union(model.columnsWithLineBreaks).sorted()
-        booleanColumnIndices = Set(format.columnTypes.filter { $0.value == .boolean }.keys)
         cachedSelectSources = format.selectSources
         cachedSourceSpecs = format.sourceSpecs
+        // Types a `source` column borrows come first: a mirrored `text` field
+        // wraps, and so has a say in how tall its rows are.
+        refreshInheritedSourceTypes()
+        let displayTypes = (0..<model.columnCount).map { ($0, displayType(ofColumn: $0)) }
+        textColumnIndices = displayTypes.filter { $0.1 == .text }.map(\.0)
+        growColumns = Set(textColumnIndices).union(model.columnsWithLineBreaks).sorted()
+        booleanColumnIndices = Set(displayTypes.filter { $0.1 == .boolean }.map(\.0))
         refreshSelectOptions(format: format)
         palette = Palette(accent: format.accent.color)
         frozenRowCount = (format.freezeFieldRow && model.hasFieldNameRow) ? 1 : 0
@@ -825,7 +833,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 if editingCell == GridPos(row: r, col: c) { continue }
                 let rect = cellRect(r, c)
                 let font = cellFont(forRow: r, column: c)
-                let type = plainRow ? (cachedTypes[c] ?? .raw) : .raw
+                let type = plainRow ? displayType(ofColumn: c) : .raw
+                // A mirrored cell wears its donor's type but keeps the
+                // filled-in-for-you look: a shade back from typed values.
+                let mirrored = plainRow && cachedTypes[c] == .source
+                let cellColor = mirrored ? NSColor.secondaryLabelColor : rowColor
                 // Empty cells have nothing to draw — except in a `boolean`
                 // column (empty is an unchecked box) or a select column
                 // (empty still gets its dropdown chevron).
@@ -849,7 +861,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 if type == .raw, model.isFieldNameRow(r) || text.contains("\n") {
                     var area = rect.insetBy(dx: 6, dy: 4)
                     area.size.width = max(min(area.maxX, textClip.maxX) - area.minX, 1)
-                    textRenderer.draw(text, font: font, color: rowColor, in: area,
+                    textRenderer.draw(text, font: font, color: cellColor, in: area,
                                       misspellings: [], verticallyCentered: true)
                     continue
                 }
@@ -858,12 +870,19 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                 case .text:
                     // Prose: wrapped, and spell-checked with the misspellings
                     // underlined the way a text view would.
-                    textRenderer.draw(text, font: font, color: rowColor,
+                    // Mirrored prose isn't spell-checked: the squiggle would
+                    // mark a typo only the other sheet can fix.
+                    textRenderer.draw(text, font: font, color: cellColor,
                                       in: rect.insetBy(dx: 6, dy: 4),
-                                      misspellings: spellIndex.misspellings(in: text))
+                                      misspellings: mirrored
+                                          ? [] : spellIndex.misspellings(in: text))
                 case .boolean:
                     if let checked = checkboxState(at: GridPos(row: r, col: c)) {
+                        // A mirrored box is dimmed: it reports the source's
+                        // answer, it isn't a switch to flip.
+                        if mirrored { cg.saveGState(); cg.setAlpha(0.55) }
                         drawCheckbox(in: checkboxRect(in: rect), checked: checked)
+                        if mirrored { cg.restoreGState() }
                     } else if !text.isEmpty {
                         // No checkbox to draw here: either the line has no ID,
                         // or the value isn't TRUE/FALSE. Show it as-is, red when
@@ -871,7 +890,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                         let attrs: [NSAttributedString.Key: Any] = [
                             .font: font,
                             .foregroundColor: BooleanCell(text) == .invalid
-                                ? NSColor.systemRed : rowColor,
+                                ? NSColor.systemRed : cellColor,
                         ]
                         let size = text.size(withAttributes: attrs)
                         cg.saveGState()
@@ -882,13 +901,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     }
                 case .select, .multiselect:
                     let pos = GridPos(row: r, col: c)
-                    var color = rowColor
+                    var color = cellColor
                     if selectCellKind(at: pos) != nil {
                         // The chevron marks the dropdown; text is clipped
                         // short of it. Values the options don't cover go red.
-                        drawDropdownChevron(in: chevronRect(in: rect))
-                        textClip.size.width = max(
-                            rect.maxX - Metrics.chevronHitWidth - textClip.minX, 0)
+                        // A mirrored cell has nothing to pick, so it gets the
+                        // validation but no chevron to promise otherwise.
+                        if !mirrored {
+                            drawDropdownChevron(in: chevronRect(in: rect))
+                            textClip.size.width = max(
+                                rect.maxX - Metrics.chevronHitWidth - textClip.minX, 0)
+                        }
                         if !SelectCell.isValid(text, options: selectOptionSets[c] ?? [],
                                                multi: type == .multiselect) {
                             color = .systemRed
@@ -905,24 +928,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
                               withAttributes: attrs)
                     cg.restoreGState()
-                case .source:
-                    // Mirrored from another sheet, not typed here: drawn a
-                    // shade back from the rest so it reads as filled in.
-                    let attrs: [NSAttributedString.Key: Any] = [
-                        .font: font,
-                        .foregroundColor: NSColor.secondaryLabelColor,
-                    ]
-                    let size = text.size(withAttributes: attrs)
-                    cg.saveGState()
-                    textClip.clip()
-                    text.draw(at: NSPoint(x: rect.minX + 6, y: rect.midY - size.height / 2),
-                              withAttributes: attrs)
-                    cg.restoreGState()
                 case .integer, .float:
                     let valid = type == .integer ? Int(text) != nil : Double(text) != nil
                     let attrs: [NSAttributedString.Key: Any] = [
                         .font: font,
-                        .foregroundColor: valid ? rowColor : NSColor.systemRed,
+                        .foregroundColor: valid ? cellColor : NSColor.systemRed,
                     ]
                     let size = text.size(withAttributes: attrs)
                     cg.saveGState()
@@ -930,10 +940,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
                     text.draw(at: NSPoint(x: rect.maxX - size.width - 6, y: rect.midY - size.height / 2),
                               withAttributes: attrs)
                     cg.restoreGState()
-                case .raw:
+                // `.source` lands here when the mirrored field has no type
+                // of its own to wear: one clipped line, in the mirrored grey.
+                case .raw, .source:
                     let attrs: [NSAttributedString.Key: Any] = [
                         .font: font,
-                        .foregroundColor: rowColor,
+                        .foregroundColor: cellColor,
                     ]
                     let size = text.size(withAttributes: attrs)
                     cg.saveGState()
@@ -979,7 +991,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// checkbox there would have no row to belong to), or a value that isn't
     /// TRUE/FALSE.
     private func checkboxState(at pos: GridPos) -> Bool? {
-        guard let model, cachedTypes[pos.col] == .boolean,
+        guard let model, displayType(ofColumn: pos.col) == .boolean,
               pos.row < model.rowCount, pos.col < model.columnCount,
               model.headerLevel(ofRow: pos.row) == 0, !model.isFieldNameRow(pos.row),
               !model.value(row: pos.row, column: 0).isEmpty else { return nil }
@@ -1000,7 +1012,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// Clickable checkbox at a cell, in on-screen coordinates, or nil if that
     /// cell has no checkbox.
     private func checkboxHitRect(at pos: GridPos) -> NSRect? {
-        guard checkboxState(at: pos) != nil else { return nil }
+        guard checkboxState(at: pos) != nil, !isMirroredCell(pos) else { return nil }
         return checkboxRect(in: cellScreenRect(pos))
             .insetBy(dx: -Metrics.checkboxHitMargin, dy: -Metrics.checkboxHitMargin)
     }
@@ -1031,7 +1043,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     }
 
     private func toggleCheckbox(at pos: GridPos) {
-        guard let model, let checked = checkboxState(at: pos) else { return }
+        guard let model, let checked = checkboxState(at: pos), !isMirroredCell(pos) else { return }
         model.setValue(BooleanCell.literal(!checked), row: pos.row, column: pos.col)
         undoManager?.setActionName("Toggle Checkbox")
         needsDisplay = true
@@ -1044,8 +1056,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let newValue = BooleanCell.literal(!checked)
         for r in selectedRows where r < model.rowCount {
             for c in selectedCols where c < model.columnCount {
-                guard checkboxState(at: GridPos(row: r, col: c)) != nil else { continue }
-                model.setValue(newValue, row: r, column: c)
+                let pos = GridPos(row: r, col: c)
+                guard checkboxState(at: pos) != nil, !isMirroredCell(pos) else { continue }
+                model.setValue(newValue, row: pos.row, column: pos.col)
             }
         }
         undoManager?.setActionName("Toggle Checkbox")
@@ -1059,6 +1072,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         for (column, type) in format.columnTypes where type == .select || type == .multiselect {
             guard let source = format.selectSources[column] else { continue }
             lists[column] = optionsResolver.options(for: source, tsvURL: documentURLProvider?())
+        }
+        // A column mirroring a select field is validated against that sheet's
+        // options, which came along with the type.
+        for (column, inherited) in inheritedSourceTypes
+        where inherited.type == .select || inherited.type == .multiselect {
+            lists[column] = inherited.options
         }
         selectOptions = lists
         selectOptionSets = lists.mapValues(Set.init)
@@ -1093,6 +1112,27 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         if changed { onDerivedDataChanged?() }
     }
 
+    /// Re-reads what each `source` column's donor field is typed as over in
+    /// the sheet it comes from.
+    private func refreshInheritedSourceTypes() {
+        let tsvURL = documentURLProvider?()
+        inheritedSourceTypes = cachedSourceSpecs.reduce(into: [:]) { types, entry in
+            guard cachedTypes[entry.key] == .source else { return }
+            types[entry.key] = sourceResolver.inheritedType(for: entry.value, tsvURL: tsvURL)
+        }
+    }
+
+    /// How a column is presented, which is its configured type except for a
+    /// `source` column: that one wears the type of the field it mirrors, so a
+    /// mirrored boolean shows checkboxes instead of the words TRUE and FALSE.
+    /// The values stay read-only either way — `cellType` is what says who owns
+    /// a cell, and it still reads `.source`.
+    private func displayType(ofColumn c: Int) -> ColumnType {
+        let type = cachedTypes[c] ?? .raw
+        guard type == .source else { return type }
+        return inheritedSourceTypes[c]?.type ?? .source
+    }
+
     /// True where a `source` column owns the cell and so nothing can be typed
     /// into it. Header and field-name rows are exempt — those are this sheet's
     /// own structure, not values the source provides.
@@ -1106,7 +1146,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// checkbox: a plain data row with an ID, inside the data. nil elsewhere
     /// (those cells show their text untouched, no chevron, no validation).
     private func selectCellKind(at pos: GridPos) -> (options: [String], multi: Bool)? {
-        guard let model, let type = cachedTypes[pos.col],
+        guard let model, case let type = displayType(ofColumn: pos.col),
               type == .select || type == .multiselect,
               pos.row < model.rowCount, pos.col < model.columnCount,
               model.headerLevel(ofRow: pos.row) == 0, !model.isFieldNameRow(pos.row),
@@ -1123,7 +1163,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// The clickable strip at the right edge of a select cell, in on-screen
     /// coordinates, or nil where there's no dropdown.
     private func chevronHitRect(at pos: GridPos) -> NSRect? {
-        guard selectCellKind(at: pos) != nil else { return nil }
+        guard selectCellKind(at: pos) != nil, !isMirroredCell(pos) else { return nil }
         let cell = cellScreenRect(pos)
         return NSRect(x: cell.maxX - Metrics.chevronHitWidth, y: cell.minY,
                       width: Metrics.chevronHitWidth, height: cell.height)
@@ -1219,9 +1259,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// column's type entirely — they're raw. Past the end of the data a row is
     /// a plain data row in waiting, so the column's type already applies.
     private func cellType(row: Int, column: Int) -> ColumnType {
-        if let model, row < model.rowCount,
-           model.headerLevel(ofRow: row) > 0 || model.isFieldNameRow(row) { return .raw }
+        if isRawRow(row) { return .raw }
         return cachedTypes[column] ?? .raw
+    }
+
+    /// The same, but for laying the cell out: a mirrored cell wears the type of
+    /// the field it comes from, so a mirrored `text` field wraps over as many
+    /// lines as it needs the way the original does.
+    private func cellDisplayType(row: Int, column: Int) -> ColumnType {
+        if isRawRow(row) { return .raw }
+        return displayType(ofColumn: column)
+    }
+
+    private func isRawRow(_ row: Int) -> Bool {
+        guard let model, row < model.rowCount else { return false }
+        return model.headerLevel(ofRow: row) > 0 || model.isFieldNameRow(row)
     }
 
     /// True when a cell is laid out as a block of lines instead of one clipped
@@ -1229,7 +1281,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// it. (The field-name row wraps too, but its height is settled before
     /// this is asked.)
     private func wrapsText(row: Int, column: Int, text: String) -> Bool {
-        switch cellType(row: row, column: column) {
+        switch cellDisplayType(row: row, column: column) {
         case .text: return true
         case .raw: return text.contains("\n")
         default: return false
@@ -2034,7 +2086,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         // Space toggles checkboxes in `boolean` columns; anywhere else it falls
         // through and types a space.
         if Int(scalar) == 32, !mods.contains(.command), !mods.contains(.control),
-           checkboxState(at: focus) != nil {
+           checkboxState(at: focus) != nil, !isMirroredCell(focus) {
             toggleCheckboxesInSelection()
             return
         }
@@ -2992,7 +3044,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             for c in cols {
                 // A checkbox is a fixed size, so the text in the file (TRUE /
                 // FALSE) says nothing about how wide the column needs to be.
-                if format.columnTypes[c] == .boolean {
+                if displayType(ofColumn: c) == .boolean {
                     format.columnWidths[c] = Metrics.minColWidth
                     continue
                 }
