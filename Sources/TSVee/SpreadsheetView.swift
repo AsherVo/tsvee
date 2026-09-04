@@ -206,7 +206,7 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         case selectCells
         case selectRows
         case selectColumns
-        case resizeColumn(col: Int, startX: CGFloat, startWidth: CGFloat)
+        case resizeColumn(cols: [Int], startX: CGFloat, startWidth: CGFloat)
         case fillHandle
         case moveRows(ClosedRange<Int>)
         case moveColumns(ClosedRange<Int>)
@@ -1615,7 +1615,8 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
         case .columnHeader(let c, let resizeEdge):
             if let edge = resizeEdge {
-                dragMode = .resizeColumn(col: edge, startX: p.x, startWidth: width(ofColumn: edge))
+                dragMode = .resizeColumn(cols: columnsResized(byDraggingEdgeOf: edge),
+                                         startX: p.x, startWidth: width(ofColumn: edge))
             } else if !shift, isFullColumnSelection, selectedCols.contains(c), !selectedCols.contains(0) {
                 // Grabbing an already-selected header moves the selection.
                 dragMode = .moveColumns(selectedCols)
@@ -1669,6 +1670,16 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         }
     }
 
+    /// Dragging one seam of a multi-column selection resizes every selected
+    /// column to match, so the whole block lands on the dragged column's width.
+    /// The ID column keeps its own width unless it is the one being dragged.
+    private func columnsResized(byDraggingEdgeOf col: Int) -> [Int] {
+        guard isFullColumnSelection, selectedCols.contains(col), selectedCols.count > 1 else {
+            return [col]
+        }
+        return selectedCols.filter { $0 == col || ($0 > 0 && !hiddenColumns.contains($0)) }
+    }
+
     private func selectColumn(_ c: Int, extend: Bool) {
         if extend {
             focus = GridPos(row: gridRows - 1, col: c)
@@ -1711,8 +1722,9 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             focus = GridPos(row: gridRows - 1, col: columnAtScreenX(p.x, vis: vis))
             selectionDidChange()
 
-        case .resizeColumn(let col, let startX, let startWidth):
-            cachedWidths[col] = max(Metrics.minColWidth, startWidth + (p.x - startX))
+        case .resizeColumn(let cols, let startX, let startWidth):
+            let newWidth = max(Metrics.minColWidth, startWidth + (p.x - startX))
+            for c in cols { cachedWidths[c] = newWidth }
             rebuildOffsets()
             needsDisplay = true
 
@@ -1745,10 +1757,11 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
 
     override func mouseUp(with event: NSEvent) {
         switch dragMode {
-        case .resizeColumn(let col, _, _):
-            if let finalWidth = cachedWidths[col] {
+        case .resizeColumn(let cols, _, _):
+            let finalWidths = cols.compactMap { c in cachedWidths[c].map { (c, $0) } }
+            if !finalWidths.isEmpty {
                 onFormatChange? { format in
-                    format.columnWidths[col] = finalWidth
+                    for (c, w) in finalWidths { format.columnWidths[c] = w }
                 }
             }
 
