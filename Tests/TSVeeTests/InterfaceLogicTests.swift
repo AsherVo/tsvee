@@ -589,3 +589,28 @@ final class FlagDuplicateColumnTests: XCTestCase {
         XCTAssertTrue(flagged.hasCustomFormatting)
     }
 }
+
+final class SelectionReadoutTests: XCTestCase {
+
+    func testPlainCountReadsFilledOverTotal() {
+        let tally = SelectionTally(populated: 5, total: 6, idsOnly: false, optionCounts: [])
+        XCTAssertEqual(FormulaBarView.tallyText(tally), "Count: 5/6")
+    }
+
+    func testIDColumnCountsEntries() {
+        XCTAssertEqual(
+            FormulaBarView.tallyText(
+                SelectionTally(populated: 1, total: 1, idsOnly: true, optionCounts: [])),
+            "1 entry")
+        XCTAssertEqual(
+            FormulaBarView.tallyText(
+                SelectionTally(populated: 12, total: 12, idsOnly: true, optionCounts: [])),
+            "12 entries")
+    }
+
+    func testSelectColumnAppendsThePerOptionBreakdown() {
+        let tally = SelectionTally(populated: 5, total: 6, idsOnly: false,
+                                   optionCounts: [("red", 3), ("blue", 2)])
+        XCTAssertEqual(FormulaBarView.tallyText(tally), "Count: 5/6   red 3 · blue 2")
+    }
+}

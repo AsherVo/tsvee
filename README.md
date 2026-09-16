@@ -58,7 +58,12 @@ bundle` app carries).
   name), rows with no ID, and everything past the end of the data are all
   skipped. In a Boolean column only checked boxes count as populated.
   Selecting a collapsed header counts everything folded under it, so you can
-  tally a section without unfolding it.
+  tally a section without unfolding it. Down a single Select / Multi-Select
+  column the tally also breaks the values down by option —
+  `Count: 12/16   red 7 · blue 5` — in the order the options are defined,
+  leaving out options nothing uses. Empty cells have nothing to count, and a
+  cell the options don't cover (the red one) is skipped whole; on a
+  multi-select every entry in a cell counts.
 - **Frozen panes**: the field-name row and the ID column stay pinned while you
   scroll (both on by default; toggle in the View menu, persisted via `.tss`).
 - **Sticky section headers**: scroll into a section and its `#` header — along

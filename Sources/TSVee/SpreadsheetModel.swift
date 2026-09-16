@@ -147,6 +147,32 @@ final class SpreadsheetModel {
         return (populated, empty)
     }
 
+    /// How often each option of a `select` / `multiselect` column occurs down
+    /// a range of rows, in the order the options are defined. Options nothing
+    /// uses are left out.
+    ///
+    /// Entry rows only, exactly as `tally` counts them. Empty cells have no
+    /// value to count, and a cell the options don't describe — the one the
+    /// grid flags red — is left out whole rather than half-counted, so the
+    /// breakdown says the same thing the column does.
+    func optionCounts(rows rowRange: ClosedRange<Int>, column: Int,
+                      options: [String], multi: Bool) -> [(value: String, count: Int)] {
+        guard column < columnCount, !options.isEmpty else { return [] }
+        let allowed = Set(options)
+        var counts: [String: Int] = [:]
+        for row in rowRange where row < rowCount {
+            guard headerLevel(ofRow: row) == 0, !isFieldNameRow(row),
+                  !rows[row][0].isEmpty else { continue }
+            let value = rows[row][column]
+            guard SelectCell.isValid(value, options: allowed, multi: multi) else { continue }
+            for token in SelectCell.tokens(value) { counts[token, default: 0] += 1 }
+        }
+        return options.compactMap { option in
+            guard let count = counts[option] else { return nil }
+            return (option, count)
+        }
+    }
+
     /// Header level of a row: 0 = plain data, 1–3 = "#"/"##"/"###" headers.
     func headerLevel(ofRow row: Int) -> Int {
         guard row < rows.count else { return 0 }

@@ -364,6 +364,64 @@ final class SpreadsheetModelTests: XCTestCase {
         let tally = model.tally(rows: 0...400, columns: 0...30, booleanColumns: [])
         XCTAssertEqual(tally.populated + tally.empty, 9)   // 3 data rows × 3 columns
     }
+
+    // MARK: - Select option counts
+
+    /// Column 1 is a single-select over [red, green, blue], column 2 a
+    /// multi-select over the same options. Rows 0/2/5/6 aren't entries; row 4
+    /// holds values no option covers.
+    private func optionCountModel() -> SpreadsheetModel {
+        makeModel("""
+        ID\tColor\tColors
+        a\tred\tred, blue
+        # Section\tgreen\tgreen
+        b\tblue\t
+        c\tmauve\tred, mauve
+        ### note\tred\tred
+        \tred\tred
+        d\t\tblue, blue
+        e\tred\tred, green
+        """)
+    }
+
+    func testOptionCountsUseOptionOrderAndSkipUnusedOptions() {
+        let model = optionCountModel()
+        let counts = model.optionCounts(rows: 0...8, column: 1,
+                                        options: ["blue", "red", "green"], multi: false)
+        // Entry rows a, b, e only: mauve is invalid, d is empty, and the
+        // header/comment/ID-less rows aren't entries at all.
+        XCTAssertEqual(counts.map(\.value), ["blue", "red"])
+        XCTAssertEqual(counts.map(\.count), [1, 2])
+    }
+
+    func testMultiSelectCountsEveryEntryInACell() {
+        let model = optionCountModel()
+        let counts = model.optionCounts(rows: 0...8, column: 2,
+                                        options: ["red", "green", "blue"], multi: true)
+        // a: red+blue, d: blue+blue, e: red+green. Row 4's cell has an option
+        // the list doesn't cover, so none of it counts.
+        XCTAssertEqual(counts.map(\.value), ["red", "green", "blue"])
+        XCTAssertEqual(counts.map(\.count), [2, 1, 3])
+    }
+
+    func testOptionCountsRejectAMultiValuedSingleSelectCell() {
+        let model = optionCountModel()
+        // Column 2's cells are lists; read as single-select, only "green" — on
+        // a header row, so not an entry — is even well-formed.
+        let counts = model.optionCounts(rows: 0...8, column: 2,
+                                        options: ["red", "green", "blue"], multi: false)
+        XCTAssertTrue(counts.isEmpty)
+    }
+
+    func testOptionCountsHonorTheRowRangeAndNeedOptions() {
+        let model = optionCountModel()
+        XCTAssertEqual(model.optionCounts(rows: 1...3, column: 1,
+                                          options: ["red", "green", "blue"], multi: false)
+                           .map(\.value), ["red", "blue"])
+        XCTAssertTrue(model.optionCounts(rows: 0...8, column: 1, options: [], multi: false).isEmpty)
+        XCTAssertTrue(model.optionCounts(rows: 0...8, column: 9,
+                                         options: ["red"], multi: false).isEmpty)
+    }
 }
 
 final class BooleanColumnFillTests: XCTestCase {

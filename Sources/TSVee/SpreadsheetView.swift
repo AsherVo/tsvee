@@ -13,6 +13,10 @@ struct SelectionTally {
     /// row has an ID by definition, so a filled/total split there would always
     /// read `12/12` — it's a count of entries, and says so.
     let idsOnly: Bool
+    /// For a selection down a single `select` / `multiselect` column: how many
+    /// times each option is used, in the order the options are defined. Empty
+    /// everywhere else.
+    let optionCounts: [(value: String, count: Int)]
 }
 
 /// The grid itself. A single custom-drawn view (only visible cells are ever
@@ -2172,7 +2176,21 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
         let total = tally.populated + tally.empty
         guard total > 0 else { return nil }
         return SelectionTally(populated: tally.populated, total: total,
-                              idsOnly: selectedCols == 0...0)
+                              idsOnly: selectedCols == 0...0,
+                              optionCounts: selectedOptionCounts(model: model))
+    }
+
+    /// The per-option breakdown that rides along with the tally when the
+    /// selection sits in one `select` / `multiselect` column. Two columns at
+    /// once would be two different option lists sharing a readout, so that
+    /// case gets the plain count.
+    private func selectedOptionCounts(model: SpreadsheetModel) -> [(value: String, count: Int)] {
+        guard selectedCols.count == 1, let column = selectedCols.first else { return [] }
+        let type = displayType(ofColumn: column)
+        guard type == .select || type == .multiselect else { return [] }
+        return model.optionCounts(rows: selectedRows, column: column,
+                                  options: selectOptions[column] ?? [],
+                                  multi: type == .multiselect)
     }
 
     private func selectionDidChange() {

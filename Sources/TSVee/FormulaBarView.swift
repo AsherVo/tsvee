@@ -50,6 +50,12 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
         tallyLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .medium)
         tallyLabel.textColor = .secondaryLabelColor
         tallyLabel.isHidden = true
+        // A select column's per-option breakdown can run long. It gives way to
+        // the content field rather than shoving it off the bar; the tooltip
+        // still has the whole of it.
+        tallyLabel.lineBreakMode = .byTruncatingTail
+        tallyLabel.cell?.truncatesLastVisibleLine = true
+        tallyLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // A stack so the warning slides over to the edge whenever there's no
         // tally to show (hidden arranged views drop out of the layout).
@@ -96,9 +102,9 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
         contentField.isEditable = editable
         contentField.textColor = editable ? .labelColor : .secondaryLabelColor
         if let tally {
-            tallyLabel.stringValue = tally.idsOnly
-                ? "\(tally.populated) entr\(tally.populated == 1 ? "y" : "ies")"
-                : "Count: \(tally.populated)/\(tally.total)"
+            let text = Self.tallyText(tally)
+            tallyLabel.stringValue = text
+            tallyLabel.toolTip = tally.optionCounts.isEmpty ? nil : text
             tallyLabel.isHidden = false
         } else {
             tallyLabel.isHidden = true
@@ -109,6 +115,19 @@ final class FormulaBarView: NSView, NSTextFieldDelegate {
         } else {
             duplicateButton.isHidden = true
         }
+    }
+
+    /// The selection readout: the count, plus — down a select column — how
+    /// the counted values break down by option.
+    static func tallyText(_ tally: SelectionTally) -> String {
+        let count = tally.idsOnly
+            ? "\(tally.populated) entr\(tally.populated == 1 ? "y" : "ies")"
+            : "Count: \(tally.populated)/\(tally.total)"
+        guard !tally.optionCounts.isEmpty else { return count }
+        let breakdown = tally.optionCounts
+            .map { "\($0.value) \($0.count)" }
+            .joined(separator: " · ")
+        return "\(count)   \(breakdown)"
     }
 
     @objc private func jumpToDuplicate() {
