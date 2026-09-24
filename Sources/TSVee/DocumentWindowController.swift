@@ -46,6 +46,11 @@ final class DocumentWindowController: NSWindowController {
         scrollView.autohidesScrollers = false
         scrollView.documentView = spreadsheetView
         scrollView.contentView.postsBoundsChangedNotifications = true
+        // Zoom (⌘+ / ⌘- / ⌘0, or pinch) scales the clip view, so the grid
+        // keeps drawing and hit-testing in document coordinates.
+        scrollView.allowsMagnification = true
+        scrollView.minMagnification = SpreadsheetView.zoomSteps.first!
+        scrollView.maxMagnification = SpreadsheetView.zoomSteps.last!
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
 

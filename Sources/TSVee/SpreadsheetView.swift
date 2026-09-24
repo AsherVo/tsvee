@@ -2063,11 +2063,17 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     /// focused too; the menu gets first refusal either way, so nothing fires
     /// twice.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // ⌘= is the unshifted ⌘+ (Zoom In), the way it is in Safari.
+        if flags == .command, event.charactersIgnoringModifiers == "=" {
+            zoomIn(nil)
+            return true
+        }
         guard let window, (window.tabbedWindows?.count ?? 0) > 1,
               let key = event.charactersIgnoringModifiers else {
             return super.performKeyEquivalent(with: event)
         }
-        switch (event.modifierFlags.intersection(.deviceIndependentFlagsMask), key) {
+        switch (flags, key) {
         case ([.command, .shift], "["), ([.control, .shift], "\t"),
              ([.control, .shift], "\u{19}"):
             window.selectPreviousTab(nil)
@@ -2609,6 +2615,33 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
     @objc func toggleFreezeIDColumn(_ sender: Any?) {
         onFormatChange? { $0.freezeIDColumn.toggle() }
         modelDidChange()
+    }
+
+    // MARK: - Zoom (View menu)
+
+    /// The magnifications ⌘+ / ⌘- step through. Pinching can land anywhere
+    /// between the ends; stepping from there goes to the next stop over.
+    static let zoomSteps: [CGFloat] = [0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3]
+
+    private var zoom: CGFloat { enclosingScrollView?.magnification ?? 1 }
+
+    @objc func zoomIn(_ sender: Any?) {
+        if let next = Self.zoomSteps.first(where: { $0 > zoom + 0.001 }) { setZoom(next) }
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        if let next = Self.zoomSteps.last(where: { $0 < zoom - 0.001 }) { setZoom(next) }
+    }
+
+    @objc func zoomToActualSize(_ sender: Any?) {
+        setZoom(1)
+    }
+
+    /// Zooms around the top-left of the viewport, so the cells you were
+    /// looking at stay put rather than sliding off toward a corner.
+    private func setZoom(_ magnification: CGFloat) {
+        guard let scrollView = enclosingScrollView else { return }
+        scrollView.setMagnification(magnification, centeredAt: visibleRect.origin)
     }
 
     // MARK: - Accent color (Sheet menu)
@@ -3465,6 +3498,12 @@ final class SpreadsheetView: NSView, NSTextFieldDelegate, NSMenuItemValidation {
             let format = formatProvider?() ?? TSSFormat()
             menuItem.state = format.freezeIDColumn ? .on : .off
             return true
+        case #selector(zoomIn(_:)):
+            return zoom < Self.zoomSteps.last! - 0.001
+        case #selector(zoomOut(_:)):
+            return zoom > Self.zoomSteps.first! + 0.001
+        case #selector(zoomToActualSize(_:)):
+            return abs(zoom - 1) > 0.001
         case #selector(setSheetAccent(_:)):
             let format = formatProvider?() ?? TSSFormat()
             menuItem.state = Self.accent(of: menuItem) == format.accent ? .on : .off

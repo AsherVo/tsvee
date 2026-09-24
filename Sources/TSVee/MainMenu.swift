@@ -105,6 +105,15 @@ enum MainMenu {
         menu.addItem(withTitle: "Freeze ID Column",
                      action: NSSelectorFromString("toggleFreezeIDColumn:"), keyEquivalent: "")
         menu.addItem(.separator())
+        // ⌘= also zooms in (handled in `SpreadsheetView`), so there's no need
+        // to reach for shift.
+        menu.addItem(withTitle: "Zoom In",
+                     action: NSSelectorFromString("zoomIn:"), keyEquivalent: "+")
+        menu.addItem(withTitle: "Zoom Out",
+                     action: NSSelectorFromString("zoomOut:"), keyEquivalent: "-")
+        menu.addItem(withTitle: "Actual Size",
+                     action: NSSelectorFromString("zoomToActualSize:"), keyEquivalent: "0")
+        menu.addItem(.separator())
         menu.addItem(withTitle: "Show Tab Bar",
                      action: #selector(NSWindow.toggleTabBar(_:)), keyEquivalent: "")
         menu.addItem(withTitle: "Show All Tabs",
